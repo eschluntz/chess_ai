@@ -8,4 +8,5 @@ board.pop()
 board.legal_moves
 board.is_game_over()
 board.outcome()
+board.turn
 ```
