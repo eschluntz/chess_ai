@@ -1,0 +1,9 @@
+numpy
+pytest
+coverage
+codecov
+mock
+termcolor
+tqdm
+python-chess
+flake8
