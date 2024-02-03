@@ -56,11 +56,13 @@ def test_ongoing_game(eval_function):
 # Tests for individual eval functions
 #####################################
 
+
 def test_piece_value_eval_with_only_kings():
     board = chess.Board("7k/8/8/8/8/8/8/7K w - - 0 1")
     score, done = piece_value_eval(board)
     assert done, "insufficient material"
     assert score == 0, "Score should be 0 when only kings are on the board"
+
 
 def test_piece_value_eval_with_extra_queen_for_white():
     board = chess.Board("7k/8/8/8/8/8/3Q4/7K w - - 0 1")
@@ -68,11 +70,13 @@ def test_piece_value_eval_with_extra_queen_for_white():
     assert not done
     assert score == 9, "Score should be positive when white has more material"
 
+
 def test_piece_value_eval_with_extra_queen_for_black():
     board = chess.Board("7k/3q4/8/8/8/8/8/7K w - - 0 1")
     score, done = piece_value_eval(board)
     assert not done
     assert score == -9, "Score should be negative when black has more material"
+
 
 def test_piece_value_eval_with_complex_position():
     board = chess.Board("r1bk3r/p2pBpNp/n4n2/1p1NP2P/6P1/3P4/P1P1K3/q5b1")

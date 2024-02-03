@@ -2,8 +2,10 @@
 
 import time
 
+
 class Timer:
     """Context manager to measure time of things inside it"""
+
     def __init__(self, name):
         self.name = name
 
