@@ -3,7 +3,6 @@
 """
 Contains classical search algorithms for playing chess (or other games)
 """
-import numpy as np
 import chess
 import random
 import math
@@ -13,7 +12,7 @@ from utils import Timer
 TIME_DISCOUNT = 0.99
 
 
-def negamax(board, eval_fn, max_depth, alpha=-np.inf, beta=np.inf):
+def negamax(board, eval_fn, max_depth, alpha=-999999, beta=999999):
     """Finds the best move using the symmetric, negative form of MiniMax and AlphaBeta pruning.
 
     board: should follow the python-chess API including
@@ -36,16 +35,20 @@ def negamax(board, eval_fn, max_depth, alpha=-np.inf, beta=np.inf):
         return score, None
 
     # are we maxing or mining?
-    direction = 1.0 if board.turn else -1.0
+    direction = 1 if board.turn else -1
 
     # loop!
     best_move = None
-    best_score = -np.inf * direction
+    best_score = -999999 * direction
 
-    all_moves = list(board.legal_moves)
+    # explore captures first as basic move ordering
+    all_caps = set(list(board.generate_legal_captures()))
+    all_moves = set(list((board.legal_moves)))
+    all_moves -= all_caps
+    moves_list = list(all_caps) + list(all_moves)
 
     # search the tree!
-    for move in all_moves:
+    for move in moves_list:
         board.push(move)
         score, _ = negamax(board, eval_fn, max_depth - 1, alpha, beta)
         board.pop()
@@ -62,7 +65,7 @@ def negamax(board, eval_fn, max_depth, alpha=-np.inf, beta=np.inf):
         if beta <= alpha:  # we know the parent won't choose us. abandon the search!
             break
 
-    return best_score * TIME_DISCOUNT, best_move
+    return int(best_score * TIME_DISCOUNT), best_move
 
 
 class MCTSNode:
@@ -132,8 +135,15 @@ def MCTS(root, iterations=1000):
 
 if __name__ == "__main__":
     board = chess.Board("r2qkb1r/pp2nppp/3p4/2pNN1B1/2BnP3/3P4/PPP2PPP/R2bK2R w KQkq - 1 0")
-    with Timer("mcts"):
+    # with Timer("mcts"):
 
-        root = MCTSNode(board)
-        best_move = MCTS(root, 100)  # Using 100 iterations for quick example, more iterations = better move selection
+    #     root = MCTSNode(board)
+    #     best_move = MCTS(root, 100)  # Using 100 iterations for quick example, more iterations = better move selection
+    # print(f"Best move: {best_move}")
+
+    from eval import piece_value_eval
+
+    with Timer("negamax"):
+        for _ in range(5):
+            _, best_move = negamax(board, piece_value_eval, 5)
     print(f"Best move: {best_move}")

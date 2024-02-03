@@ -1,3 +1,7 @@
+[![Build Status](https://github.com/eschluntz/chess_ai/actions/workflows/run_tests.yml/badge.svg)](https://github.com/eschluntz/chess_ai/actions)
+
+[![codecov](https://codecov.io/gh/eschluntz/chess_ai/graph/badge.svg?token=2ZF9NR8ILO)](https://codecov.io/gh/eschluntz/chess_ai)
+
 # chess_ai
 AI algorithms for chess, including classical, ML, and RL.
 
@@ -10,6 +14,25 @@ board.is_game_over()
 board.outcome()
 board.turn
 ```
+
+# Search Algorithms Implemented
+
+MiniMax (Negamax) with Alpha-Beta pruning
+
+Monte Carlo Tree Search
+
+# Evaluation Algorithms Implemented
+
+Piece Value Sums
+
+Piece Position Tables
+
+# Algorithms TODO
+
+Iterative Deepening
+- One big downside of MiniMax is that it uses a fixed depth. 
+
+
 
 ## Performance Testing
 
