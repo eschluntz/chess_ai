@@ -5,5 +5,5 @@ codecov
 mock
 termcolor
 tqdm
-python-chess
+chess
 flake8

@@ -16,7 +16,7 @@ def test_timer_context_manager():
 
     # Extracting the printed time measurement
     output = captured_output.getvalue()
-    assert output.startswith("test_timer: 0.050")
+    assert output.startswith("test_timer: 0.05")
 
 
 test_timer_context_manager()

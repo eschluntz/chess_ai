@@ -15,6 +15,16 @@ board.outcome()
 board.turn
 ```
 
+# Install
+
+```
+python -m venv venv
+source venv/bin/activate
+
+pip install -r requirements.txt
+```
+
+
 # Search Algorithms Implemented
 
 MiniMax (Negamax) with Alpha-Beta pruning
