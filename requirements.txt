@@ -7,3 +7,6 @@ termcolor
 tqdm
 chess
 flake8
+datasets
+ipywidgets
+widgetsnbextension
