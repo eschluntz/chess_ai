@@ -61,3 +61,5 @@ piece_position_eval:
 
 ### Basic scikit learn value model
 
+Training log for piece value random forest:
+1. 

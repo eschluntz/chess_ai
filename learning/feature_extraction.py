@@ -6,7 +6,7 @@ import chess
 import numpy as np
 
 
-def extract_features(board: chess.Board) -> np.ndarray:
+def extract_features_basic(board: chess.Board) -> np.ndarray:
     """
     Extract features from a chess board for the random forest model.
     Simple features based on material and piece positions.
@@ -65,3 +65,58 @@ def extract_features(board: chess.Board) -> np.ndarray:
     features.append(-1 if board.has_queenside_castling_rights(chess.BLACK) else 0)
     
     return np.array(features)
+
+
+def extract_features_piece_square(board: chess.Board) -> np.ndarray:
+    """
+    Extract features that allow learning piece-square tables.
+    Creates a feature for every possible board position for every piece type.
+    
+    This creates 6 piece types * 64 squares * 2 colors = 768 binary features
+    plus the same additional features as the basic extractor.
+    """
+    # Pre-allocate the feature array
+    # 768 piece-square features + 11 additional features
+    features = np.zeros(779, dtype=np.float32)
+    
+    # Piece-square features: one-hot encoding for each piece type on each square
+    # Order: pawn, knight, bishop, rook, queen, king
+    piece_types = [chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING]
+    
+    # Get piece locations for each type and color
+    for piece_idx, piece_type in enumerate(piece_types):
+        # White pieces
+        white_squares = board.pieces(piece_type, chess.WHITE)
+        for square in white_squares:
+            # Feature index: piece_type_index * 128 + square * 2 + 0 (white)
+            features[piece_idx * 128 + square * 2] = 1
+        
+        # Black pieces
+        black_squares = board.pieces(piece_type, chess.BLACK)
+        for square in black_squares:
+            # Feature index: piece_type_index * 128 + square * 2 + 1 (black)
+            features[piece_idx * 128 + square * 2 + 1] = 1
+    
+    # Add additional features starting at index 768
+    base_idx = 768
+    
+    # Turn to move (1 if white, -1 if black)
+    features[base_idx] = 1 if board.turn == chess.WHITE else -1
+    
+    # Castling rights
+    features[base_idx + 1] = 1 if board.has_kingside_castling_rights(chess.WHITE) else 0
+    features[base_idx + 2] = 1 if board.has_queenside_castling_rights(chess.WHITE) else 0
+    features[base_idx + 3] = 1 if board.has_kingside_castling_rights(chess.BLACK) else 0
+    features[base_idx + 4] = 1 if board.has_queenside_castling_rights(chess.BLACK) else 0
+    
+    # Total material count (helps model understand material balance)
+    for i, piece_type in enumerate(piece_types):
+        white_count = len(board.pieces(piece_type, chess.WHITE))
+        black_count = len(board.pieces(piece_type, chess.BLACK))
+        features[base_idx + 5 + i] = white_count - black_count
+    
+    return features
+
+
+# For backward compatibility
+extract_features = extract_features_basic

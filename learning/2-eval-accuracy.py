@@ -23,13 +23,28 @@ from eval_common import (
     create_combined_scatter_plot,
     print_results_summary
 )
-from feature_extraction import extract_features
+from feature_extraction import extract_features_basic, extract_features_piece_square
 
 
 def load_random_forest_eval(model_path: str) -> Callable[[chess.Board], tuple[int, bool]]:
     """Load the trained random forest model and return an evaluation function."""
     with open(model_path, 'rb') as f:
-        model = pickle.load(f)
+        data = pickle.load(f)
+        
+    # Handle both old and new model formats
+    if isinstance(data, dict):
+        model = data['model']
+        feature_type = data['feature_type']
+    else:
+        # Old format - assume basic features
+        model = data
+        feature_type = 'basic'
+    
+    # Choose the appropriate feature extractor
+    if feature_type == 'piece_square':
+        extract_features = extract_features_piece_square
+    else:
+        extract_features = extract_features_basic
     
     def random_forest_eval(board: chess.Board) -> tuple[int, bool]:
         """Evaluate a position using the trained random forest model."""
@@ -40,13 +55,13 @@ def load_random_forest_eval(model_path: str) -> Callable[[chess.Board], tuple[in
     return random_forest_eval
 
 
-def main(num_samples: int = 10000) -> None:
+def main(num_samples: int = 2000) -> None:
     """
     Evaluate chess evaluation functions.
-    Always uses the first 10,000 positions for evaluation.
+    Uses the first positions from the dataset for evaluation.
     
     Args:
-        num_samples: Number of positions to evaluate (default: 10000)
+        num_samples: Number of positions to evaluate (default: 2000)
     """
     # Define evaluation functions
     baseline_name = 'piece_value_eval'
@@ -57,20 +72,35 @@ def main(num_samples: int = 10000) -> None:
         (piece_position_eval, 'piece_position_eval'),
     ]
     
-    # Load the trained model if it exists
-    model_path = os.path.join(os.path.dirname(__file__), "random_forest_chess_model.pkl")
-    if os.path.exists(model_path):
-        print(f"Loading trained model from {model_path}...")
-        rf_eval = load_random_forest_eval(model_path)
-        all_functions.append((rf_eval, 'random_forest_model'))
+    # Load all trained models
+    model_dir = os.path.dirname(__file__)
+    model_files = sorted([f for f in os.listdir(model_dir) if f.startswith('random_forest_chess_model_') and f.endswith('.pkl')])
+    
+    if model_files:
+        print(f"\nFound {len(model_files)} trained models:")
+        for model_file in model_files:
+            # Extract info from filename
+            # Format: random_forest_chess_model_<size>_<feature_type>.pkl
+            parts = model_file.replace('random_forest_chess_model_', '').replace('.pkl', '').split('_')
+            if len(parts) >= 2:
+                # New format with feature type
+                model_name = f'rf_{parts[0]}_{parts[1]}'
+            else:
+                # Old format
+                model_name = f'rf_model_{parts[0]}'
+            
+            model_path = os.path.join(model_dir, model_file)
+            print(f"  Loading {model_file}...")
+            rf_eval = load_random_forest_eval(model_path)
+            all_functions.append((rf_eval, model_name))
     else:
-        print("No trained model found. Evaluating only hardcoded functions.")
+        print("No trained models found. Evaluating only hardcoded functions.")
     
     # Load the streaming dataset
     print("Loading Lichess chess position evaluations dataset (streaming)...")
     ds_full = load_dataset("Lichess/chess-position-evaluations", streaming=True)
     
-    # Process the first 10k positions (reserved for evaluation)
+    # Process the first N positions (reserved for evaluation)
     print(f"\nProcessing first {num_samples} positions (evaluation set)...")
     dataset_stream = ds_full["train"]
     
