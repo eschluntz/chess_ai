@@ -15,6 +15,7 @@ import sys
 import os
 from collections.abc import Callable
 from typing import Any
+from scipy.stats import spearmanr
 
 # Add parent directory to path to import eval functions
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -176,8 +177,9 @@ def evaluate_accuracy(eval_function: Callable[[chess.Board], tuple[int, bool]], 
     mse = mean_squared_error(true_values, predictions)
     rmse = np.sqrt(mse)
     
-    # Calculate correlation
-    correlation = np.corrcoef(predictions, true_values)[0, 1]
+    # Calculate correlations
+    pearson_correlation = np.corrcoef(predictions, true_values)[0, 1]
+    spearman_correlation, _ = spearmanr(predictions, true_values)
     
     # Calculate percentage of correct sign predictions (who's winning)
     correct_sign = np.sum((predictions > 0) == (true_values > 0)) / len(predictions) * 100
@@ -186,7 +188,8 @@ def evaluate_accuracy(eval_function: Callable[[chess.Board], tuple[int, bool]], 
         'mae': mae,
         'mse': mse,
         'rmse': rmse,
-        'correlation': correlation,
+        'pearson_correlation': pearson_correlation,
+        'spearman_correlation': spearman_correlation,
         'correct_sign_percentage': correct_sign,
         'num_evaluated': len(predictions),
         'mate_positions': stats['mate_positions'],
@@ -214,7 +217,7 @@ def create_scatter_plots_with_and_without_mates(results_with_mates: dict[str, An
     
     ax1.set_xlabel('True Score (Stockfish centipawns)', fontsize=12)
     ax1.set_ylabel('Predicted Score (centipawns)', fontsize=12)
-    ax1.set_title(f'{eval_name} vs Stockfish (Including Mates)\nCorrelation: {results_with_mates["correlation"]:.3f}, MAE: {results_with_mates["mae"]:.0f}', fontsize=14)
+    ax1.set_title(f'{eval_name} vs Stockfish (Including Mates)\nSpearman: {results_with_mates.get("spearman_correlation", results_with_mates.get("correlation", 0)):.3f}, MAE: {results_with_mates["mae"]:.0f}', fontsize=14)
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
@@ -236,7 +239,7 @@ def create_scatter_plots_with_and_without_mates(results_with_mates: dict[str, An
     
     ax2.set_xlabel('True Score (Stockfish centipawns)', fontsize=12)
     ax2.set_ylabel('Predicted Score (centipawns)', fontsize=12)
-    ax2.set_title(f'{eval_name} vs Stockfish (Excluding Mates)\nCorrelation: {results_without_mates["correlation"]:.3f}, MAE: {results_without_mates["mae"]:.0f}', fontsize=14)
+    ax2.set_title(f'{eval_name} vs Stockfish (Excluding Mates)\nSpearman: {results_without_mates.get("spearman_correlation", results_without_mates.get("correlation", 0)):.3f}, MAE: {results_without_mates["mae"]:.0f}', fontsize=14)
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
@@ -299,7 +302,8 @@ def main(eval_functions: list[tuple[Callable[[chess.Board], tuple[int, bool]], s
         print(f"\nResults for {func_name} WITH mates:")
         print(f"  Mean Absolute Error: {results_with_mates['mae']:.2f} centipawns")
         print(f"  Root Mean Squared Error: {results_with_mates['rmse']:.2f} centipawns")
-        print(f"  Correlation with Stockfish: {results_with_mates['correlation']:.3f}")
+        print(f"  Pearson correlation: {results_with_mates['pearson_correlation']:.3f}")
+        print(f"  Spearman correlation: {results_with_mates['spearman_correlation']:.3f}")
         print(f"  Correct winner prediction: {results_with_mates['correct_sign_percentage']:.1f}%")
         print(f"  Positions evaluated: {results_with_mates['num_evaluated']}")
         print(f"  Mate positions included: {results_with_mates['mate_positions']}")
@@ -308,7 +312,8 @@ def main(eval_functions: list[tuple[Callable[[chess.Board], tuple[int, bool]], s
         print(f"\nResults for {func_name} WITHOUT mates:")
         print(f"  Mean Absolute Error: {results_without_mates['mae']:.2f} centipawns")
         print(f"  Root Mean Squared Error: {results_without_mates['rmse']:.2f} centipawns")
-        print(f"  Correlation with Stockfish: {results_without_mates['correlation']:.3f}")
+        print(f"  Pearson correlation: {results_without_mates['pearson_correlation']:.3f}")
+        print(f"  Spearman correlation: {results_without_mates['spearman_correlation']:.3f}")
         print(f"  Correct winner prediction: {results_without_mates['correct_sign_percentage']:.1f}%")
         print(f"  Positions evaluated: {results_without_mates['num_evaluated']}")
         print(f"  Total positions filtered: {results_without_mates['total_filtered']}")
@@ -331,18 +336,18 @@ def main(eval_functions: list[tuple[Callable[[chess.Board], tuple[int, bool]], s
             
             print("  WITH mates:")
             mae_improvement = base_results['with_mates']['mae'] - func_results['with_mates']['mae']
-            corr_improvement = func_results['with_mates']['correlation'] - base_results['with_mates']['correlation']
+            spearman_improvement = func_results['with_mates']['spearman_correlation'] - base_results['with_mates']['spearman_correlation']
             win_improvement = func_results['with_mates']['correct_sign_percentage'] - base_results['with_mates']['correct_sign_percentage']
             print(f"    MAE improvement: {mae_improvement:.2f} centipawns")
-            print(f"    Correlation improvement: {corr_improvement:.3f}")
+            print(f"    Spearman improvement: {spearman_improvement:.3f}")
             print(f"    Winner prediction improvement: {win_improvement:.1f}%")
             
             print("  WITHOUT mates:")
             mae_improvement = base_results['without_mates']['mae'] - func_results['without_mates']['mae']
-            corr_improvement = func_results['without_mates']['correlation'] - base_results['without_mates']['correlation']
+            spearman_improvement = func_results['without_mates']['spearman_correlation'] - base_results['without_mates']['spearman_correlation']
             win_improvement = func_results['without_mates']['correct_sign_percentage'] - base_results['without_mates']['correct_sign_percentage']
             print(f"    MAE improvement: {mae_improvement:.2f} centipawns")
-            print(f"    Correlation improvement: {corr_improvement:.3f}")
+            print(f"    Spearman improvement: {spearman_improvement:.3f}")
             print(f"    Winner prediction improvement: {win_improvement:.1f}%")
     
 
