@@ -7,81 +7,127 @@ Evaluate the accuracy of chess evaluation functions using the Lichess position e
 import chess
 from datasets import load_dataset
 import numpy as np
+import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import sys
 import os
+from collections.abc import Callable
+from typing import Any
 
 # Add parent directory to path to import eval functions
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from eval import piece_value_eval, piece_position_eval
 
 
-def create_board_from_fen(fen):
+def create_board_from_fen(fen: str) -> chess.Board:
     """Create a chess.Board object from FEN string."""
     return chess.Board(fen)
 
 
-def convert_mate_to_cp(mate_in_moves):
-    """
-    Convert mate-in-N moves to centipawn equivalent.
-    Uses a formula that gives very high scores for forced mates.
-    
-    Common approach: 20000 - (300 * mate_in_moves) for positive mates
-    This gives mate-in-1 = 19700 cp, mate-in-10 = 17000 cp, etc.
-    """
-    if mate_in_moves > 0:
-        # Positive means white has mate
-        return 20000 - (300 * mate_in_moves)
-    else:
-        # Negative means black has mate
-        return -20000 + (300 * abs(mate_in_moves))
-
-
-def should_skip_position(example, include_mates, max_mate_distance, max_cp):
+def should_skip_position(example: dict[str, Any], include_mates: bool, max_mate_distance: int, max_cp: int) -> bool:
     """
     Determine if a position should be skipped based on filtering criteria.
     
     Returns:
-        (should_skip, reason)
-        - should_skip: Boolean indicating if position should be skipped
-        - reason: String indicating why it was skipped ('mate_excluded', 'long_mate', 'extreme_position', or None)
+        Boolean indicating if position should be skipped
     """
-    if example['mate'] is not None:
+    # Skip if neither mate nor cp value exists
+    if pd.isna(example.get('mate')) and pd.isna(example.get('cp')):
+        return True
+        
+    if pd.notna(example.get('mate')):
         if not include_mates:
-            return True, 'mate_excluded'
+            return True
         
         # Filter out very long mates
         if abs(example['mate']) > max_mate_distance:
-            return True, 'long_mate'
+            return True
         
-        return False, None
+        return False
     else:
+        # Skip if cp is missing
+        if pd.isna(example.get('cp')):
+            return True
+            
         # Filter out extreme positions
         if abs(example['cp']) > max_cp:
-            return True, 'extreme_position'
+            return True
         
-        return False, None
+        return False
 
 
-def get_true_score(example):
+def extract_centipawn_score(example: dict[str, Any]) -> int:
     """
-    Get the true score from the example, converting mate scores to centipawns if needed.
+    Extract the centipawn score from the example, converting mate scores if needed.
+    
+    For mate positions, uses the formula: 20000 - (300 * mate_in_moves)
+    This gives mate-in-1 = 19700 cp, mate-in-10 = 17000 cp, etc.
     
     This function should only be called after should_skip_position returns False,
     so we can safely assume any mate score needs conversion.
     
     Returns:
-        true_score: The true centipawn score (or converted mate score)
+        centipawn_score: The centipawn score (either direct or converted from mate)
     """
-    if example['mate'] is not None:
-        return convert_mate_to_cp(example['mate'])
+    if pd.notna(example.get('mate')):
+        mate_in_moves = example['mate']
+        if mate_in_moves > 0:
+            # Positive means white has mate
+            return 20000 - (300 * mate_in_moves)
+        else:
+            # Negative means black has mate
+            return -20000 + (300 * abs(mate_in_moves))
     else:
-        return example['cp']
+        # Return cp value, or 0 if it's missing (should be rare after filtering)
+        return example.get('cp', 0)
 
 
-def evaluate_accuracy(eval_function, dataset_stream, num_samples=10000, include_mates=True, max_mate_distance=15, max_cp=750):
+def process_dataset_batch(dataset_stream: Any, num_samples: int, include_mates: bool, max_mate_distance: int, max_cp: int) -> tuple[pd.DataFrame, dict[str, int]]:
+    """
+    Process dataset and return filtered examples as a DataFrame.
+    Uses functional approach with dataset.take() and DataFrame operations.
+    """
+    # Load data using take()
+    print(f"Loading {num_samples} positions...")
+    data = list(tqdm(dataset_stream.take(num_samples), total=num_samples, desc="Loading positions"))
+    
+    # Convert to DataFrame
+    df = pd.DataFrame(data)
+    initial_count = len(df)
+    
+    # First, filter out any rows with NaN values in critical columns
+    df = df.dropna(subset=['fen'])
+    
+    # Apply filtering using the helper function
+    df['should_skip'] = df.apply(
+        lambda row: should_skip_position(row, include_mates, max_mate_distance, max_cp),
+        axis=1
+    )
+    
+    # Filter out skipped positions
+    df_filtered = df[~df['should_skip']].copy()
+    
+    # Add true score and metadata for remaining positions
+    df_filtered['true_score'] = df_filtered.apply(extract_centipawn_score, axis=1)
+    df_filtered['is_mate'] = df_filtered['mate'].notna()
+    
+    # Calculate simple stats
+    stats = {
+        'total_loaded': initial_count,
+        'total_filtered': initial_count - len(df_filtered),
+        'mate_positions': df_filtered['is_mate'].sum(),
+        'total_processed': len(df_filtered)
+    }
+    
+    # Return only needed columns
+    processed_df = df_filtered[['fen', 'true_score', 'is_mate']]
+    
+    return processed_df, stats
+
+
+def evaluate_accuracy(eval_function: Callable[[chess.Board], tuple[int, bool]], dataset_stream: Any, num_samples: int = 10000, include_mates: bool = True, max_mate_distance: int = 15, max_cp: int = 750) -> dict[str, Any]:
     """
     Evaluate the accuracy of an evaluation function against Stockfish evaluations.
     
@@ -96,51 +142,34 @@ def evaluate_accuracy(eval_function, dataset_stream, num_samples=10000, include_
     Returns:
         dict: Dictionary containing MAE, MSE, and correlation metrics
     """
-    predictions = []
-    true_values = []
-    mate_positions = 0
-    filtered_long_mates = 0
-    filtered_extreme_positions = 0
-    
     print(f"Evaluating {eval_function.__name__} on {num_samples} positions...")
     
-    # Use tqdm for progress bar
-    for i, example in enumerate(tqdm(dataset_stream, total=num_samples, desc=f"Evaluating {eval_function.__name__}")):
-        if i >= num_samples:
-            break
-        
-        # Check if position should be skipped
-        should_skip, skip_reason = should_skip_position(
-            example, include_mates, max_mate_distance, max_cp
-        )
-        
-        if should_skip:
-            if skip_reason == 'long_mate':
-                filtered_long_mates += 1
-            elif skip_reason == 'extreme_position':
-                filtered_extreme_positions += 1
-            continue
-        
-        # Get the true score (after filtering, so mates are safe to convert)
-        true_score = get_true_score(example)
-        
-        # Track mate positions
-        if example['mate'] is not None:
-            mate_positions += 1
-        
-        # Create board from FEN
-        board = create_board_from_fen(example['fen'])
-        
-        # Get prediction from our evaluation function
-        pred_score, _ = eval_function(board)
-        
-        # Store values
-        predictions.append(pred_score)
-        true_values.append(true_score)
+    # Process dataset first
+    processed_df, stats = process_dataset_batch(
+        dataset_stream, num_samples, include_mates, max_mate_distance, max_cp
+    )
     
-    # Convert to numpy arrays
-    predictions = np.array(predictions)
-    true_values = np.array(true_values)
+    # Create boards column
+    print(f"Creating chess boards for {len(processed_df)} positions...")
+    processed_df['board'] = processed_df['fen'].apply(create_board_from_fen)
+    
+    # Evaluate all positions using apply
+    print(f"Evaluating positions with {eval_function.__name__}...")
+    tqdm.pandas(desc=f"Running {eval_function.__name__}")
+    processed_df['prediction'] = processed_df['board'].progress_apply(
+        lambda board: eval_function(board)[0]
+    )
+    
+    # Extract arrays for metrics
+    predictions = processed_df['prediction'].values
+    true_values = processed_df['true_score'].values
+    
+    # Check for NaN values and filter them out if any exist
+    mask = ~(np.isnan(predictions) | np.isnan(true_values))
+    if not mask.all():
+        print(f"Warning: Found {(~mask).sum()} NaN values, filtering them out")
+        predictions = predictions[mask]
+        true_values = true_values[mask]
     
     # Calculate metrics
     mae = mean_absolute_error(true_values, predictions)
@@ -160,15 +189,15 @@ def evaluate_accuracy(eval_function, dataset_stream, num_samples=10000, include_
         'correlation': correlation,
         'correct_sign_percentage': correct_sign,
         'num_evaluated': len(predictions),
-        'mate_positions': mate_positions,
-        'filtered_long_mates': filtered_long_mates,
-        'filtered_extreme_positions': filtered_extreme_positions,
+        'mate_positions': stats['mate_positions'],
+        'total_filtered': stats['total_filtered'],
         'predictions': predictions,
         'true_values': true_values
     }
 
 
-def create_scatter_plots_with_and_without_mates(results_with_mates, results_without_mates, eval_name, save_path):
+
+def create_scatter_plots_with_and_without_mates(results_with_mates: dict[str, Any], results_without_mates: dict[str, Any], eval_name: str) -> None:
     """Create scatter plots comparing predicted vs true scores, with and without mates."""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 8))
     
@@ -216,118 +245,106 @@ def create_scatter_plots_with_and_without_mates(results_with_mates, results_with
     ax2.text(0.02, 0.98, textstr, transform=ax2.transAxes, fontsize=10,
              verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.5))
     
-    # Save plot
+    # Display plot
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-    print(f"Scatter plot saved to {save_path}")
+    plt.show()
 
 
-def main():
+def main(eval_functions: list[tuple[Callable[[chess.Board], tuple[int, bool]], str]] = None) -> None:
+    """
+    Evaluate chess evaluation functions.
+    
+    Args:
+        eval_functions: List of (function, name) tuples to evaluate.
+                       Defaults to piece_value_eval and piece_position_eval.
+    """
+    if eval_functions is None:
+        eval_functions = [
+            (piece_value_eval, 'piece_value_eval'),
+            (piece_position_eval, 'piece_position_eval')
+        ]
+    
     # Load the streaming dataset
     print("Loading Lichess chess position evaluations dataset (streaming)...")
     ds_full = load_dataset("Lichess/chess-position-evaluations", streaming=True)
-    dataset_stream = ds_full["train"]
     
     # Number of samples to evaluate
     num_samples = 10000
     
-    # Evaluate piece_value_eval WITH mates
-    print("\n" + "="*50)
-    print("Evaluating piece_value_eval() WITH mates...")
-    piece_value_with_mates = evaluate_accuracy(piece_value_eval, dataset_stream.take(num_samples), num_samples, include_mates=True)
+    # Store results for all functions
+    all_results = {}
     
-    # Evaluate piece_value_eval WITHOUT mates
-    print("\nEvaluating piece_value_eval() WITHOUT mates...")
-    dataset_stream = ds_full["train"]
-    piece_value_without_mates = evaluate_accuracy(piece_value_eval, dataset_stream.take(num_samples), num_samples, include_mates=False)
-    
-    print("\nResults for piece_value_eval() WITH mates:")
-    print(f"  Mean Absolute Error: {piece_value_with_mates['mae']:.2f} centipawns")
-    print(f"  Root Mean Squared Error: {piece_value_with_mates['rmse']:.2f} centipawns")
-    print(f"  Correlation with Stockfish: {piece_value_with_mates['correlation']:.3f}")
-    print(f"  Correct winner prediction: {piece_value_with_mates['correct_sign_percentage']:.1f}%")
-    print(f"  Positions evaluated: {piece_value_with_mates['num_evaluated']}")
-    print(f"  Mate positions included: {piece_value_with_mates['mate_positions']}")
-    print(f"  Long mates filtered (>15 moves): {piece_value_with_mates['filtered_long_mates']}")
-    print(f"  Extreme positions filtered (|cp| > 750): {piece_value_with_mates['filtered_extreme_positions']}")
-    
-    print("\nResults for piece_value_eval() WITHOUT mates:")
-    print(f"  Mean Absolute Error: {piece_value_without_mates['mae']:.2f} centipawns")
-    print(f"  Root Mean Squared Error: {piece_value_without_mates['rmse']:.2f} centipawns")
-    print(f"  Correlation with Stockfish: {piece_value_without_mates['correlation']:.3f}")
-    print(f"  Correct winner prediction: {piece_value_without_mates['correct_sign_percentage']:.1f}%")
-    print(f"  Positions evaluated: {piece_value_without_mates['num_evaluated']}")
-    print(f"  Extreme positions filtered (|cp| > 750): {piece_value_without_mates['filtered_extreme_positions']}")
-    
-    # Create scatter plots for piece_value_eval
-    create_scatter_plots_with_and_without_mates(piece_value_with_mates, piece_value_without_mates,
-                                               'piece_value_eval', 
-                                               '/Users/erik/code/chess_ai/learning/piece_value_eval_scatter.png')
-    
-    # Evaluate piece_position_eval WITH mates
-    print("\n" + "="*50)
-    print("Evaluating piece_position_eval() WITH mates...")
-    dataset_stream = ds_full["train"]
-    piece_position_with_mates = evaluate_accuracy(piece_position_eval, dataset_stream.take(num_samples), num_samples, include_mates=True)
-    
-    # Evaluate piece_position_eval WITHOUT mates
-    print("\nEvaluating piece_position_eval() WITHOUT mates...")
-    dataset_stream = ds_full["train"]
-    piece_position_without_mates = evaluate_accuracy(piece_position_eval, dataset_stream.take(num_samples), num_samples, include_mates=False)
-    
-    print("\nResults for piece_position_eval() WITH mates:")
-    print(f"  Mean Absolute Error: {piece_position_with_mates['mae']:.2f} centipawns")
-    print(f"  Root Mean Squared Error: {piece_position_with_mates['rmse']:.2f} centipawns")
-    print(f"  Correlation with Stockfish: {piece_position_with_mates['correlation']:.3f}")
-    print(f"  Correct winner prediction: {piece_position_with_mates['correct_sign_percentage']:.1f}%")
-    print(f"  Positions evaluated: {piece_position_with_mates['num_evaluated']}")
-    print(f"  Mate positions included: {piece_position_with_mates['mate_positions']}")
-    print(f"  Long mates filtered (>15 moves): {piece_position_with_mates['filtered_long_mates']}")
-    print(f"  Extreme positions filtered (|cp| > 750): {piece_position_with_mates['filtered_extreme_positions']}")
-    
-    print("\nResults for piece_position_eval() WITHOUT mates:")
-    print(f"  Mean Absolute Error: {piece_position_without_mates['mae']:.2f} centipawns")
-    print(f"  Root Mean Squared Error: {piece_position_without_mates['rmse']:.2f} centipawns")
-    print(f"  Correlation with Stockfish: {piece_position_without_mates['correlation']:.3f}")
-    print(f"  Correct winner prediction: {piece_position_without_mates['correct_sign_percentage']:.1f}%")
-    print(f"  Positions evaluated: {piece_position_without_mates['num_evaluated']}")
-    print(f"  Extreme positions filtered (|cp| > 750): {piece_position_without_mates['filtered_extreme_positions']}")
-    
-    # Create scatter plots for piece_position_eval
-    create_scatter_plots_with_and_without_mates(piece_position_with_mates, piece_position_without_mates,
-                                               'piece_position_eval', 
-                                               '/Users/erik/code/chess_ai/learning/piece_position_eval_scatter.png')
-    
-    # Compare results
-    print("\n" + "="*50)
-    print("Comparison (WITH mates):")
-    print(f"  MAE improvement: {piece_value_with_mates['mae'] - piece_position_with_mates['mae']:.2f} centipawns")
-    print(f"  Correlation improvement: {piece_position_with_mates['correlation'] - piece_value_with_mates['correlation']:.3f}")
-    print(f"  Winner prediction improvement: {piece_position_with_mates['correct_sign_percentage'] - piece_value_with_mates['correct_sign_percentage']:.1f}%")
-    
-    print("\nComparison (WITHOUT mates):")
-    print(f"  MAE improvement: {piece_value_without_mates['mae'] - piece_position_without_mates['mae']:.2f} centipawns")
-    print(f"  Correlation improvement: {piece_position_without_mates['correlation'] - piece_value_without_mates['correlation']:.3f}")
-    print(f"  Winner prediction improvement: {piece_position_without_mates['correct_sign_percentage'] - piece_value_without_mates['correct_sign_percentage']:.1f}%")
-    
-    # Save results (exclude large arrays from JSON)
-    results = {
-        'piece_value_eval': {
-            'with_mates': {k: v for k, v in piece_value_with_mates.items() if k not in ['predictions', 'true_values']},
-            'without_mates': {k: v for k, v in piece_value_without_mates.items() if k not in ['predictions', 'true_values']}
-        },
-        'piece_position_eval': {
-            'with_mates': {k: v for k, v in piece_position_with_mates.items() if k not in ['predictions', 'true_values']},
-            'without_mates': {k: v for k, v in piece_position_without_mates.items() if k not in ['predictions', 'true_values']}
+    # Evaluate each function
+    for eval_func, func_name in eval_functions:
+        print("\n" + "="*50)
+        print(f"Evaluating {func_name}")
+        
+        # Evaluate WITH mates
+        print(f"\nEvaluating {func_name} WITH mates...")
+        dataset_stream = ds_full["train"]
+        results_with_mates = evaluate_accuracy(eval_func, dataset_stream.take(num_samples), num_samples, include_mates=True)
+        
+        # Evaluate WITHOUT mates
+        print(f"\nEvaluating {func_name} WITHOUT mates...")
+        dataset_stream = ds_full["train"]
+        results_without_mates = evaluate_accuracy(eval_func, dataset_stream.take(num_samples), num_samples, include_mates=False)
+        
+        # Store results
+        all_results[func_name] = {
+            'with_mates': results_with_mates,
+            'without_mates': results_without_mates
         }
-    }
+        
+        # Print results
+        print(f"\nResults for {func_name} WITH mates:")
+        print(f"  Mean Absolute Error: {results_with_mates['mae']:.2f} centipawns")
+        print(f"  Root Mean Squared Error: {results_with_mates['rmse']:.2f} centipawns")
+        print(f"  Correlation with Stockfish: {results_with_mates['correlation']:.3f}")
+        print(f"  Correct winner prediction: {results_with_mates['correct_sign_percentage']:.1f}%")
+        print(f"  Positions evaluated: {results_with_mates['num_evaluated']}")
+        print(f"  Mate positions included: {results_with_mates['mate_positions']}")
+        print(f"  Total positions filtered: {results_with_mates['total_filtered']}")
+        
+        print(f"\nResults for {func_name} WITHOUT mates:")
+        print(f"  Mean Absolute Error: {results_without_mates['mae']:.2f} centipawns")
+        print(f"  Root Mean Squared Error: {results_without_mates['rmse']:.2f} centipawns")
+        print(f"  Correlation with Stockfish: {results_without_mates['correlation']:.3f}")
+        print(f"  Correct winner prediction: {results_without_mates['correct_sign_percentage']:.1f}%")
+        print(f"  Positions evaluated: {results_without_mates['num_evaluated']}")
+        print(f"  Total positions filtered: {results_without_mates['total_filtered']}")
+        
+        # Create scatter plots
+        create_scatter_plots_with_and_without_mates(results_with_mates, results_without_mates, func_name)
     
-    import json
-    with open('/Users/erik/code/chess_ai/learning/eval_accuracy_results.json', 'w') as f:
-        json.dump(results, f, indent=2)
+    # Compare results if we have at least 2 functions
+    if len(eval_functions) >= 2:
+        print("\n" + "="*50)
+        print("Comparisons:")
+        
+        base_name = eval_functions[0][1]
+        base_results = all_results[base_name]
+        
+        for eval_func, func_name in eval_functions[1:]:
+            func_results = all_results[func_name]
+            
+            print(f"\n{base_name} vs {func_name}:")
+            
+            print("  WITH mates:")
+            mae_improvement = base_results['with_mates']['mae'] - func_results['with_mates']['mae']
+            corr_improvement = func_results['with_mates']['correlation'] - base_results['with_mates']['correlation']
+            win_improvement = func_results['with_mates']['correct_sign_percentage'] - base_results['with_mates']['correct_sign_percentage']
+            print(f"    MAE improvement: {mae_improvement:.2f} centipawns")
+            print(f"    Correlation improvement: {corr_improvement:.3f}")
+            print(f"    Winner prediction improvement: {win_improvement:.1f}%")
+            
+            print("  WITHOUT mates:")
+            mae_improvement = base_results['without_mates']['mae'] - func_results['without_mates']['mae']
+            corr_improvement = func_results['without_mates']['correlation'] - base_results['without_mates']['correlation']
+            win_improvement = func_results['without_mates']['correct_sign_percentage'] - base_results['without_mates']['correct_sign_percentage']
+            print(f"    MAE improvement: {mae_improvement:.2f} centipawns")
+            print(f"    Correlation improvement: {corr_improvement:.3f}")
+            print(f"    Winner prediction improvement: {win_improvement:.1f}%")
     
-    print("\nResults saved to eval_accuracy_results.json")
 
 
 if __name__ == "__main__":

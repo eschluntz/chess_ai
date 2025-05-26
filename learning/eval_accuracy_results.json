@@ -7,44 +7,4 @@
       "correlation": 0.38664414727221363,
       "correct_sign_percentage": 47.35140771637122,
       "num_evaluated": 9590,
-      "mate_positions": 1067,
-      "filtered_long_mates": 228,
-      "filtered_extreme_positions": 182
-    },
-    "without_mates": {
-      "mae": 119.09491962923853,
-      "mse": 41446.31233133873,
-      "rmse": 203.58367402947303,
-      "correlation": 0.34231736561781934,
-      "correct_sign_percentage": 43.13035316203215,
-      "num_evaluated": 8523,
-      "mate_positions": 0,
-      "filtered_long_mates": 0,
-      "filtered_extreme_positions": 182
-    }
-  },
-  "piece_position_eval": {
-    "with_mates": {
-      "mae": 2050.5302398331596,
-      "mse": 33888997.3008342,
-      "rmse": 5821.425710325109,
-      "correlation": 0.3911552937756315,
-      "correct_sign_percentage": 57.32012513034411,
-      "num_evaluated": 9590,
-      "mate_positions": 1067,
-      "filtered_long_mates": 228,
-      "filtered_extreme_positions": 182
-    },
-    "without_mates": {
-      "mae": 132.09550627713247,
-      "mse": 42375.8699988267,
-      "rmse": 205.8540016585218,
-      "correlation": 0.3789776756884528,
-      "correct_sign_percentage": 54.38225976768744,
-      "num_evaluated": 8523,
-      "mate_positions": 0,
-      "filtered_long_mates": 0,
-      "filtered_extreme_positions": 182
-    }
-  }
-}
+      "mate_positions": 
