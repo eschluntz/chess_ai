@@ -6,7 +6,7 @@ Contains classical eval functions for chess
 import chess
 
 
-CHECKMATE_VALUE = 10_000
+CHECKMATE_VALUE = 20_000  # Compatible with mate-to-cp conversion
 
 
 def _game_over_eval(board):

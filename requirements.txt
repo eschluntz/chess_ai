@@ -10,3 +10,5 @@ flake8
 datasets
 ipywidgets
 widgetsnbextension
+matplotlib
+scikit-learn
