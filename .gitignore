@@ -6,3 +6,4 @@ coverage.xml
 env/
 venv/
 .python-version
+*.pkl
