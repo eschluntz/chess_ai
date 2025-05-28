@@ -6,13 +6,9 @@ Loads the first 1k positions from the Lichess dataset and tests the highest and 
 """
 
 from datasets import load_dataset
-import sys
-import os
 import chess
 
-# Add parent directory to path to import eval functions
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eval import piece_value_eval, piece_position_eval
+from core.eval import piece_value_eval, piece_position_eval
 
 
 def main():
@@ -56,7 +52,6 @@ def main():
     
     for pos in positions:
         cp = pos['cp']
-        abs_cp = abs(cp)
         
         # Find first position with CP between 5k and 7k
         if positive_pos is None and cp > 500 and cp < 7000:

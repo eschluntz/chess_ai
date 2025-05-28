@@ -1,7 +1,7 @@
 import chess
 
-from search import negamax
-from eval import piece_value_eval
+from core.search import negamax
+from core.eval import piece_value_eval
 
 
 def test_negamax_finds_checkmates():

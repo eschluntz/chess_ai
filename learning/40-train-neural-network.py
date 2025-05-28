@@ -18,12 +18,12 @@ import matplotlib.pyplot as plt
 from IPython.display import clear_output
 
 # Import helper functions from the eval accuracy script
-from eval_accuracy_helpers import (
+from learning.eval_accuracy_helpers import (
     create_board_from_fen,
     should_skip_position,
     extract_centipawn_score
 )
-from feature_extraction import extract_features_piece_square
+from learning.feature_extraction import extract_features_piece_square
 
 
 class ChessDataset(Dataset):

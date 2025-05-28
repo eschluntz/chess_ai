@@ -6,33 +6,28 @@ Always uses the first 10,000 positions for evaluation.
 """
 
 from datasets import load_dataset
-import sys
 import os
 import pickle
 from collections.abc import Callable
 import chess
 
-# Add parent directory to path to import eval functions
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from eval import piece_value_eval, piece_position_eval
+from core.eval import piece_value_eval, piece_position_eval
 
 # Import helper functions
-from eval_accuracy_helpers import process_dataset_batch
-from eval_common import (
+from learning.eval_accuracy_helpers import process_dataset_batch
+from learning.eval_common import (
     evaluate_all_functions,
     create_combined_scatter_plot,
     print_results_summary
 )
-from feature_extraction import extract_features_basic, extract_features_piece_square
+from learning.feature_extraction import extract_features_basic, extract_features_piece_square
 
 # Import neural network loader
-import sys
-sys.path.append(os.path.dirname(__file__))
 try:
     # Import from the correct module name (4-train-neural-network)
     import importlib.util
     spec = importlib.util.spec_from_file_location("train_neural_network", 
-                                                  os.path.join(os.path.dirname(__file__), "4-train-neural-network.py"))
+                                                  os.path.join(os.path.dirname(__file__), "40-train-neural-network.py"))
     train_neural_network = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(train_neural_network)
     load_neural_network_eval = train_neural_network.load_neural_network_eval

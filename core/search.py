@@ -7,7 +7,7 @@ import chess
 import random
 import math
 
-from utils import Timer
+from core.utils import Timer
 
 TIME_DISCOUNT = 0.99
 

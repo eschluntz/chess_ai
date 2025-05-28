@@ -1,4 +1,4 @@
-from utils import Timer
+from core.utils import Timer
 from io import StringIO
 import sys
 import time

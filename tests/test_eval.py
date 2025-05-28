@@ -1,7 +1,7 @@
 import chess
 import pytest
 
-from eval import _game_over_eval, piece_value_eval, piece_position_eval, CHECKMATE_VALUE
+from core.eval import _game_over_eval, piece_value_eval, piece_position_eval, CHECKMATE_VALUE
 
 ########################################################
 # Game over conditions should be the same for all evals!

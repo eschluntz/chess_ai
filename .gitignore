@@ -7,3 +7,5 @@ env/
 venv/
 .python-version
 *.pkl
+.pytest_cache/
+__pycache__
