@@ -22,7 +22,9 @@ from feature_extraction import extract_features_basic, extract_features_piece_sq
 
 
 def train_random_forest_model(num_train_samples: int = 50000, num_val_samples: int = 10000, 
-                              feature_type: str = 'basic', model_suffix: str = ''):
+                              feature_type: str = 'basic', model_suffix: str = '',
+                              n_estimators: int = 100, max_depth: int = 10,
+                              min_samples_split: int = 20, min_samples_leaf: int = 10):
     """
     Train a random forest model on chess positions.
     
@@ -31,9 +33,13 @@ def train_random_forest_model(num_train_samples: int = 50000, num_val_samples: i
         num_val_samples: Number of validation samples to use
         feature_type: 'basic' or 'piece_square' feature extraction
         model_suffix: Additional suffix for model filename
+        n_estimators: Number of trees in the forest
+        max_depth: Maximum depth of the trees
+        min_samples_split: Minimum samples required to split a node
+        min_samples_leaf: Minimum samples required at a leaf node
     
     Returns:
-        The trained model
+        tuple: (model, metrics_dict) where metrics_dict contains train and validation errors
     """
     print("Loading Lichess chess position evaluations dataset (streaming)...")
     ds = load_dataset("Lichess/chess-position-evaluations", streaming=True)
@@ -84,12 +90,17 @@ def train_random_forest_model(num_train_samples: int = 50000, num_val_samples: i
     )
     
     # Train the model
-    print("\nTraining Random Forest model...")
+    print(f"\nTraining Random Forest model with params:")
+    print(f"  n_estimators: {n_estimators}")
+    print(f"  max_depth: {max_depth}")
+    print(f"  min_samples_split: {min_samples_split}")
+    print(f"  min_samples_leaf: {min_samples_leaf}")
     model = RandomForestRegressor(
-        n_estimators=100,
-        max_depth=20,
-        min_samples_split=10,
-        min_samples_leaf=5,
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        min_samples_split=min_samples_split,
+        min_samples_leaf=min_samples_leaf,
+        max_features='sqrt',
         random_state=42,
         n_jobs=-1
     )
@@ -169,19 +180,62 @@ def train_random_forest_model(num_train_samples: int = 50000, num_val_samples: i
     print("\nTraining complete!")
     print(f"Model saved to: {model_path}")
     
-    return model
+    # Return model and metrics
+    metrics = {
+        'num_train_samples': num_train_samples,
+        'feature_type': feature_type,
+        'n_estimators': n_estimators,
+        'max_depth': max_depth,
+        'min_samples_split': min_samples_split,
+        'min_samples_leaf': min_samples_leaf,
+        'train_mae': full_train_mae,
+        'val_mae': final_val_mae
+    }
+    
+    return model, metrics
 
 
 if __name__ == "__main__":
-    # Train models with different amounts of data and feature types
-    training_sizes = [50_000, 100_000]
-    # training_sizes = [50_000, 100_000, 200_000, 400_000, 800_000]
+    # Fixed training size
+    training_size = 100_000
+    feature_type = 'piece_square'
     
-    feature_types = ['piece_square']
+    # Linear sweep - all parameters scale together
+    experiments = [
+        # Small model (fast, less accurate)
+        {'n_estimators': 10, 'max_depth': 5, 'min_samples_split': 50, 'min_samples_leaf': 25},
+        # Medium-small model
+        {'n_estimators': 30, 'max_depth': 10, 'min_samples_split': 20, 'min_samples_leaf': 10},
+        # Medium model (baseline)
+        {'n_estimators': 100, 'max_depth': 15, 'min_samples_split': 10, 'min_samples_leaf': 5},
+        # Large model
+        {'n_estimators': 200, 'max_depth': 20, 'min_samples_split': 5, 'min_samples_leaf': 2},
+        # Very large model (slow, potentially overfit)
+        {'n_estimators': 500, 'max_depth': None, 'min_samples_split': 2, 'min_samples_leaf': 1},
+    ]
     
-    for feature_type in feature_types:
-        for size in training_sizes:
-            print("\n" + "="*80)
-            print(f"Training {feature_type} model with {size:,} samples")
-            print("="*80)
-            train_random_forest_model(num_train_samples=size, feature_type=feature_type)
+    # List to store results for CSV
+    results = []
+    
+    csv_path = os.path.join(os.path.dirname(__file__), 'rf_parameter_sweep_results.csv')
+    
+    for i, params in enumerate(experiments, 1):
+        print("\n" + "="*80)
+        print(f"Experiment {i}/{len(experiments)}")
+        print(f"Training {feature_type} model with {training_size:,} samples")
+        print(f"Parameters: {params}")
+        print("="*80)
+        
+        model, metrics = train_random_forest_model(
+            num_train_samples=training_size,
+            feature_type=feature_type,
+            **params
+        )
+        results.append(metrics)
+        
+        # Save results to CSV after each model
+        results_df = pd.DataFrame(results)
+        results_df.to_csv(csv_path, index=False)
+        print(f"\nResults saved to: {csv_path}")
+    
+    print(f"\n\nAll training complete! Final results saved to: {csv_path}")

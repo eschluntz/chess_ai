@@ -32,34 +32,39 @@ Backup datasets:
     - Contains full games, but only About 6% of the games include Stockfish analysis evaluations: 
 - https://csslab.cs.toronto.edu/datasets/#maia_kdd
 
+### sanity checks on data 
+[x] test a very positive and very negative data points, and make sure my baseline agrees with the sign.
+
 ## Board Evaluation
 
-`2-eval-accuracy.py`
+See `2-eval-accuracy.py`
 
 eval functions should have the signature: `chess.Board -> centipawn score (max 20k)`
 
-### Versions
-- baseline: `piece_value_eval()` just sums up the value of material
+
+
+
+
+
+### Results
+- `piece_value_eval()` just sums up the value of material
 - `piece_position_eval()` heuristic that uses positions of pieces
 
 
-![Evaluation Comparisons](eval_comparisons.png)
+## Value Model Training
 
-```
-piece_value_eval (BASELINE):
-  WITH mates:
-    Mean Absolute Error: 2040.90 centipawns
-    Spearman correlation: 0.375
-    Correct winner prediction: 47.4%
-piece_position_eval:
-  WITH mates:
-    Mean Absolute Error: 2050.53 centipawns
-    Spearman correlation: 0.339
-    Correct winner prediction: 57.3%
-    vs baseline: MAE -10, Spearman -0.036, Win% +10.0
-```
+### Board Representation
+- 8x8 binary grids of piece locations (1 layer for each type of piece for each color) seems to be very standard
+- extra bits to represent current turn, castling rights, en passant, etc
 
-### Basic scikit learn value model
+optional extra features:
+- 8x8 binary grid of all squares under attack for each side?
 
-Training log for piece value random forest:
-1. 
+### Learning a piece value table
+
+### Learning a random forest
+
+### Learning a neural net
+- Conv2D layers at start
+- residual network
+

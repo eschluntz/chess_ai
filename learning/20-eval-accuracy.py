@@ -25,6 +25,22 @@ from eval_common import (
 )
 from feature_extraction import extract_features_basic, extract_features_piece_square
 
+# Import neural network loader
+import sys
+sys.path.append(os.path.dirname(__file__))
+try:
+    # Import from the correct module name (4-train-neural-network)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("train_neural_network", 
+                                                  os.path.join(os.path.dirname(__file__), "4-train-neural-network.py"))
+    train_neural_network = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(train_neural_network)
+    load_neural_network_eval = train_neural_network.load_neural_network_eval
+    PYTORCH_AVAILABLE = True
+except ImportError:
+    PYTORCH_AVAILABLE = False
+    print("PyTorch not available - neural network models will be skipped")
+
 
 def load_random_forest_eval(model_path: str) -> Callable[[chess.Board], tuple[int, bool]]:
     """Load the trained random forest model and return an evaluation function."""
@@ -74,11 +90,13 @@ def main(num_samples: int = 2000) -> None:
     
     # Load all trained models
     model_dir = os.path.dirname(__file__)
-    model_files = sorted([f for f in os.listdir(model_dir) if f.startswith('random_forest_chess_model_') and f.endswith('.pkl')])
     
-    if model_files:
-        print(f"\nFound {len(model_files)} trained models:")
-        for model_file in model_files:
+    # Load Random Forest models
+    rf_model_files = sorted([f for f in os.listdir(model_dir) if f.startswith('random_forest_chess_model_') and f.endswith('.pkl')])
+    
+    if rf_model_files:
+        print(f"\nFound {len(rf_model_files)} Random Forest models:")
+        for model_file in rf_model_files:
             # Extract info from filename
             # Format: random_forest_chess_model_<size>_<feature_type>.pkl
             parts = model_file.replace('random_forest_chess_model_', '').replace('.pkl', '').split('_')
@@ -94,7 +112,32 @@ def main(num_samples: int = 2000) -> None:
             rf_eval = load_random_forest_eval(model_path)
             all_functions.append((rf_eval, model_name))
     else:
-        print("No trained models found. Evaluating only hardcoded functions.")
+        print("No Random Forest models found.")
+    
+    # Load Neural Network models if PyTorch is available
+    if PYTORCH_AVAILABLE:
+        nn_model_files = sorted([f for f in os.listdir(model_dir) if f.startswith('neural_network_chess_model_') and f.endswith('.pkl')])
+        
+        if nn_model_files:
+            print(f"\nFound {len(nn_model_files)} Neural Network models:")
+            for model_file in nn_model_files:
+                # Extract info from filename
+                # Format: neural_network_chess_model_<size>_<suffix>.pkl
+                parts = model_file.replace('neural_network_chess_model_', '').replace('.pkl', '').split('_')
+                if len(parts) >= 2:
+                    model_name = f'nn_{parts[0]}_{parts[1]}'
+                else:
+                    model_name = f'nn_{parts[0]}'
+                
+                model_path = os.path.join(model_dir, model_file)
+                print(f"  Loading {model_file}...")
+                nn_eval = load_neural_network_eval(model_path)
+                all_functions.append((nn_eval, model_name))
+        else:
+            print("No Neural Network models found.")
+    
+    if len(all_functions) == 2:  # Only baseline functions
+        print("\nNo trained models found. Evaluating only hardcoded functions.")
     
     # Load the streaming dataset
     print("Loading Lichess chess position evaluations dataset (streaming)...")

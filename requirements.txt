@@ -12,3 +12,4 @@ ipywidgets
 widgetsnbextension
 matplotlib
 scikit-learn
+torch
