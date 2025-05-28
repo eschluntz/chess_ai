@@ -72,6 +72,13 @@ optional extra features:
 - 8x8 binary grid of all squares under attack for each side?
 
 ### Learning a piece value table
+[x] basics
+[ ] is what's printed out including the base value of the piece?
+[ ] fix formatting of printed out tables (values too big)
+[ ] print out the average magnitude of the learned values, or some other measure of how extreme they are?
+[ ] pick the best value for alpha
+[ ] add it to 20-eval-accuracy
+[ ] add a function to core/eval.py that uses it
 
 ### Learning a random forest
 

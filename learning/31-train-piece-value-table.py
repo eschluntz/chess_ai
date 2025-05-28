@@ -8,7 +8,7 @@ The model learns deltas from standard piece values for each square.
 from datasets import load_dataset
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import Ridge
 from sklearn.model_selection import train_test_split
 import pickle
 import os
@@ -26,19 +26,12 @@ from core.eval import PIECE_VALUES
 class LinearPieceSquareModel:
     """Linear model that learns piece values based on their squares."""
     
-    def __init__(self):
-        # Standard piece values in centipawns (base values)
-        self.base_piece_values = {
-            chess.PAWN: 100,
-            chess.KNIGHT: 300,
-            chess.BISHOP: 300,
-            chess.ROOK: 500,
-            chess.QUEEN: 900,
-            chess.KING: 0  # King value is not learned
-        }
+    def __init__(self, alpha=1.0):
+        # Use standard piece values from core.eval
+        self.base_piece_values = PIECE_VALUES
         
-        # Initialize the linear model
-        self.model = LinearRegression()
+        # Initialize the Ridge regression model with regularization
+        self.model = Ridge(alpha=alpha)
         
         # Feature names for interpretation
         self.feature_names = []
@@ -201,7 +194,7 @@ class LinearPieceSquareModel:
         print("    a     b     c     d     e     f     g     h")
 
 
-def train_linear_piece_square_model(num_train_samples: int = 100000, num_val_samples: int = 20000):
+def train_linear_piece_square_model(num_train_samples: int = 100000, num_val_samples: int = 20000, alpha: float = 10.0):
     """Train a linear model to learn piece-square tables."""
     
     print("Loading Lichess chess position evaluations dataset...")
@@ -227,8 +220,9 @@ def train_linear_piece_square_model(num_train_samples: int = 100000, num_val_sam
     
     print(f"Filtered to {len(train_df)} valid positions")
     
-    # Initialize model
-    model = LinearPieceSquareModel()
+    # Initialize model with regularization
+    model = LinearPieceSquareModel(alpha=alpha)
+    print(f"\nUsing Ridge regression with alpha={alpha} for regularization")
     
     # Extract features
     print("Extracting features...")
@@ -282,7 +276,7 @@ def train_linear_piece_square_model(num_train_samples: int = 100000, num_val_sam
     final_val_mae = np.mean(np.abs(final_val_predictions - y_val))
     final_val_rmse = np.sqrt(np.mean((final_val_predictions - y_val)**2))
     
-    print(f"\nIndependent validation performance:")
+    print("\nIndependent validation performance:")
     print(f"  MAE: {final_val_mae:.2f} centipawns")
     print(f"  RMSE: {final_val_rmse:.2f} centipawns")
     
@@ -308,7 +302,7 @@ def train_linear_piece_square_model(num_train_samples: int = 100000, num_val_sam
     print(f"Model intercept: {other_features['intercept']:.1f} cp")
     
     # Save the model
-    model_path = os.path.join(os.path.dirname(__file__), f"linear_piece_square_model_{num_train_samples}.pkl")
+    model_path = os.path.join(os.path.dirname(__file__), "linear_piece_square_model_{}.pkl".format(num_train_samples))
     print(f"\nSaving model to {model_path}...")
     with open(model_path, 'wb') as f:
         pickle.dump(model, f)
@@ -317,4 +311,11 @@ def train_linear_piece_square_model(num_train_samples: int = 100000, num_val_sam
 
 
 if __name__ == "__main__":
-    model = train_linear_piece_square_model(num_train_samples=100000, num_val_samples=20000)
+    # Try different regularization strengths
+    alphas = [1.0, 10.0, 100.0]
+    
+    for alpha in alphas:
+        print(f"\n\n{'='*80}")
+        print(f"Training with regularization alpha={alpha}")
+        print('='*80)
+        model = train_linear_piece_square_model(num_train_samples=100000, num_val_samples=20000, alpha=alpha)
