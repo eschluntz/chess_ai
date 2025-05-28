@@ -13,7 +13,7 @@ from scipy.stats import spearmanr
 from tqdm import tqdm
 
 
-def evaluate_all_functions(eval_functions: list[tuple[Callable[[chess.Board], tuple[int, bool]], str]], processed_df: pd.DataFrame) -> dict[str, dict[str, dict[str, Any]]]:
+def evaluate_all_functions(eval_functions: list[tuple[Callable[[chess.Board], tuple[int, bool]], str]], processed_df: pd.DataFrame) -> dict[str, dict[str, Any]]:
     """
     Evaluate all functions on the same data.
     
@@ -40,64 +40,39 @@ def evaluate_all_functions(eval_functions: list[tuple[Callable[[chess.Board], tu
             lambda board: eval_func(board)[0]
         )
         
-        # Calculate metrics WITH mates
-        predictions_all = processed_df['prediction'].values
-        true_values_all = processed_df['true_score'].values
-        is_mate_all = processed_df['is_mate'].values
+        # Calculate metrics
+        predictions = processed_df['prediction'].values
+        true_values = processed_df['true_score'].values
+        is_mate = processed_df['is_mate'].values
         
-        mae_with = mean_absolute_error(true_values_all, predictions_all)
-        mse_with = mean_squared_error(true_values_all, predictions_all)
-        rmse_with = np.sqrt(mse_with)
-        pearson_with = np.corrcoef(predictions_all, true_values_all)[0, 1]
-        spearman_with, _ = spearmanr(predictions_all, true_values_all)
-        correct_sign_with = np.sum((predictions_all > 0) == (true_values_all > 0)) / len(predictions_all) * 100
-        
-        # Calculate metrics WITHOUT mates (filter using is_mate column)
-        non_mate_mask = ~is_mate_all
-        predictions_without = predictions_all[non_mate_mask]
-        true_values_without = true_values_all[non_mate_mask]
-        
-        mae_without = mean_absolute_error(true_values_without, predictions_without)
-        mse_without = mean_squared_error(true_values_without, predictions_without)
-        rmse_without = np.sqrt(mse_without)
-        pearson_without = np.corrcoef(predictions_without, true_values_without)[0, 1]
-        spearman_without, _ = spearmanr(predictions_without, true_values_without)
-        correct_sign_without = np.sum((predictions_without > 0) == (true_values_without > 0)) / len(predictions_without) * 100
+        mae = mean_absolute_error(true_values, predictions)
+        mse = mean_squared_error(true_values, predictions)
+        rmse = np.sqrt(mse)
+        pearson = np.corrcoef(predictions, true_values)[0, 1]
+        spearman, _ = spearmanr(predictions, true_values)
+        correct_sign = np.sum((predictions > 0) == (true_values > 0)) / len(predictions) * 100
         
         # Store results
         all_results[func_name] = {
-            'with_mates': {
-                'mae': mae_with,
-                'mse': mse_with,
-                'rmse': rmse_with,
-                'pearson_correlation': pearson_with,
-                'spearman_correlation': spearman_with,
-                'correct_sign_percentage': correct_sign_with,
-                'num_evaluated': len(predictions_all),
-                'mate_positions': is_mate_all.sum(),
-                'predictions': predictions_all,
-                'true_values': true_values_all
-            },
-            'without_mates': {
-                'mae': mae_without,
-                'mse': mse_without,
-                'rmse': rmse_without,
-                'pearson_correlation': pearson_without,
-                'spearman_correlation': spearman_without,
-                'correct_sign_percentage': correct_sign_without,
-                'num_evaluated': len(predictions_without),
-                'predictions': predictions_without,
-                'true_values': true_values_without
-            }
+            'mae': mae,
+            'mse': mse,
+            'rmse': rmse,
+            'pearson_correlation': pearson,
+            'spearman_correlation': spearman,
+            'correct_sign_percentage': correct_sign,
+            'num_evaluated': len(predictions),
+            'mate_positions': is_mate.sum(),
+            'predictions': predictions,
+            'true_values': true_values
         }
     
     return all_results
 
 
-def create_combined_scatter_plot(all_results: dict[str, dict[str, dict[str, Any]]], baseline_name: str) -> None:
+def create_combined_scatter_plot(all_results: dict[str, dict[str, Any]], baseline_name: str) -> None:
     """
     Create a combined scatter plot with all evaluation functions.
-    Each row is one function, columns are with/without mates.
+    Shows results including mates for all functions.
     """
     num_functions = len(all_results)
     fig, axes = plt.subplots(num_functions, 2, figsize=(16, 6 * num_functions))
@@ -107,73 +82,80 @@ def create_combined_scatter_plot(all_results: dict[str, dict[str, dict[str, Any]
         axes = axes.reshape(1, -1)
     
     for idx, (func_name, results) in enumerate(all_results.items()):
-        # Plot with mates (left column)
-        ax_with = axes[idx, 0]
-        predictions_with = results['with_mates']['predictions']
-        true_values_with = results['with_mates']['true_values']
+        predictions = results['predictions']
+        true_values = results['true_values']
         
-        ax_with.scatter(true_values_with, predictions_with, alpha=0.5, s=1)
+        # Left subplot: Full view
+        ax_full = axes[idx, 0]
+        ax_full.scatter(true_values, predictions, alpha=0.5, s=1)
         
         # Add diagonal line
-        min_val = min(true_values_with.min(), predictions_with.min())
-        max_val = max(true_values_with.max(), predictions_with.max())
-        ax_with.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect prediction')
+        min_val = min(true_values.min(), predictions.min())
+        max_val = max(true_values.max(), predictions.max())
+        ax_full.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect prediction')
         
-        ax_with.set_xlabel('True Score (Stockfish centipawns)', fontsize=12)
-        ax_with.set_ylabel('Predicted Score (centipawns)', fontsize=12)
+        ax_full.set_xlabel('True Score (Stockfish centipawns)', fontsize=12)
+        ax_full.set_ylabel('Predicted Score (centipawns)', fontsize=12)
         
         # Add improvement in title if not baseline
-        title = f'{func_name} vs Stockfish (Including Mates)\nSpearman: {results["with_mates"]["spearman_correlation"]:.3f}, MAE: {results["with_mates"]["mae"]:.0f}'
+        title = f'{func_name} vs Stockfish (Full Range)\nSpearman: {results["spearman_correlation"]:.3f}, MAE: {results["mae"]:.0f}'
         if func_name != baseline_name and baseline_name in all_results:
-            spearman_improvement = results['with_mates']['spearman_correlation'] - all_results[baseline_name]['with_mates']['spearman_correlation']
+            spearman_improvement = results['spearman_correlation'] - all_results[baseline_name]['spearman_correlation']
             title += f'\n(Δ Spearman: {spearman_improvement:+.3f})'
-        ax_with.set_title(title, fontsize=14)
+        ax_full.set_title(title, fontsize=14)
         
-        ax_with.legend()
-        ax_with.grid(True, alpha=0.3)
+        ax_full.legend()
+        ax_full.grid(True, alpha=0.3)
         
         # Add statistics text
-        textstr = f'N = {results["with_mates"]["num_evaluated"]:,}\nMate positions: {results["with_mates"]["mate_positions"]:,}'
-        ax_with.text(0.02, 0.98, textstr, transform=ax_with.transAxes, fontsize=10,
+        textstr = f'N = {results["num_evaluated"]:,}\nMate positions: {results["mate_positions"]:,}'
+        ax_full.text(0.02, 0.98, textstr, transform=ax_full.transAxes, fontsize=10,
                     verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
         
-        # Plot without mates (right column)
-        ax_without = axes[idx, 1]
-        predictions_without = results['without_mates']['predictions']
-        true_values_without = results['without_mates']['true_values']
+        # Right subplot: Zoomed view (-1000 to 1000)
+        ax_zoom = axes[idx, 1]
         
-        ax_without.scatter(true_values_without, predictions_without, alpha=0.5, s=1, color='green')
+        # Filter data for zoomed view
+        zoom_mask = (true_values >= -1000) & (true_values <= 1000) & (predictions >= -1000) & (predictions <= 1000)
+        true_values_zoom = true_values[zoom_mask]
+        predictions_zoom = predictions[zoom_mask]
         
-        # Add diagonal line
-        min_val = min(true_values_without.min(), predictions_without.min())
-        max_val = max(true_values_without.max(), predictions_without.max())
-        ax_without.plot([min_val, max_val], [min_val, max_val], 'r--', label='Perfect prediction')
+        ax_zoom.scatter(true_values_zoom, predictions_zoom, alpha=0.5, s=1, color='green')
         
-        ax_without.set_xlabel('True Score (Stockfish centipawns)', fontsize=12)
-        ax_without.set_ylabel('Predicted Score (centipawns)', fontsize=12)
+        # Add diagonal line for zoomed view
+        ax_zoom.plot([-1000, 1000], [-1000, 1000], 'r--', label='Perfect prediction')
         
-        # Add improvement in title if not baseline
-        title = f'{func_name} vs Stockfish (Excluding Mates)\nSpearman: {results["without_mates"]["spearman_correlation"]:.3f}, MAE: {results["without_mates"]["mae"]:.0f}'
-        if func_name != baseline_name and baseline_name in all_results:
-            spearman_improvement = results['without_mates']['spearman_correlation'] - all_results[baseline_name]['without_mates']['spearman_correlation']
-            title += f'\n(Δ Spearman: {spearman_improvement:+.3f})'
-        ax_without.set_title(title, fontsize=14)
+        ax_zoom.set_xlim(-1000, 1000)
+        ax_zoom.set_ylim(-1000, 1000)
+        ax_zoom.set_xlabel('True Score (Stockfish centipawns)', fontsize=12)
+        ax_zoom.set_ylabel('Predicted Score (centipawns)', fontsize=12)
         
-        ax_without.legend()
-        ax_without.grid(True, alpha=0.3)
+        # Calculate metrics for zoomed region
+        if len(predictions_zoom) > 0:
+            from sklearn.metrics import mean_absolute_error
+            from scipy.stats import spearmanr
+            mae_zoom = mean_absolute_error(true_values_zoom, predictions_zoom)
+            spearman_zoom, _ = spearmanr(predictions_zoom, true_values_zoom)
+            zoom_title = f'{func_name} vs Stockfish (Zoomed: ±1000cp)\nSpearman: {spearman_zoom:.3f}, MAE: {mae_zoom:.0f}'
+        else:
+            zoom_title = f'{func_name} vs Stockfish (Zoomed: ±1000cp)\nNo data in range'
         
-        # Add statistics text
-        textstr = f'N = {results["without_mates"]["num_evaluated"]:,}'
-        ax_without.text(0.02, 0.98, textstr, transform=ax_without.transAxes, fontsize=10,
-                       verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.5))
+        ax_zoom.set_title(zoom_title, fontsize=14)
+        ax_zoom.legend()
+        ax_zoom.grid(True, alpha=0.3)
+        
+        # Add statistics text for zoomed view
+        zoom_textstr = f'N = {len(predictions_zoom):,}\n({len(predictions_zoom)/len(predictions)*100:.1f}% of data)'
+        ax_zoom.text(0.02, 0.98, zoom_textstr, transform=ax_zoom.transAxes, fontsize=10,
+                    verticalalignment='top', bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.5))
     
-    plt.tight_layout()
+    plt.tight_layout(pad=1.0)
     plt.show()
 
 
-def print_results_summary(all_results: dict[str, dict[str, dict[str, Any]]], baseline_name: str) -> None:
+def print_results_summary(all_results: dict[str, dict[str, Any]], baseline_name: str) -> None:
     """
-    Print a summary of evaluation results.
+    Print a summary of evaluation results including mates.
     """
     print("\n" + "="*50)
     print("RESULTS SUMMARY")
@@ -183,24 +165,40 @@ def print_results_summary(all_results: dict[str, dict[str, dict[str, Any]]], bas
         is_baseline = func_name == baseline_name
         print(f"\n{func_name}{' (BASELINE)' if is_baseline else ''}:")
         
-        print("  WITH mates:")
-        print(f"    Mean Absolute Error: {results['with_mates']['mae']:.2f} centipawns")
-        print(f"    Spearman correlation: {results['with_mates']['spearman_correlation']:.3f}")
-        print(f"    Correct winner prediction: {results['with_mates']['correct_sign_percentage']:.1f}%")
+        # Print results
+        print(f"  Mean Absolute Error: {results['mae']:.2f} centipawns")
+        print(f"  Spearman correlation: {results['spearman_correlation']:.3f}")
+        print(f"  Correct winner prediction: {results['correct_sign_percentage']:.1f}%")
+        print(f"  Positions evaluated: {results['num_evaluated']:,} (including {results['mate_positions']:,} mate positions)")
         
         if not is_baseline and baseline_name in all_results:
-            mae_improvement = all_results[baseline_name]['with_mates']['mae'] - results['with_mates']['mae']
-            spearman_improvement = results['with_mates']['spearman_correlation'] - all_results[baseline_name]['with_mates']['spearman_correlation']
-            win_improvement = results['with_mates']['correct_sign_percentage'] - all_results[baseline_name]['with_mates']['correct_sign_percentage']
-            print(f"    vs baseline: MAE {mae_improvement:+.0f}, Spearman {spearman_improvement:+.3f}, Win% {win_improvement:+.1f}")
+            mae_improvement = all_results[baseline_name]['mae'] - results['mae']
+            spearman_improvement = results['spearman_correlation'] - all_results[baseline_name]['spearman_correlation']
+            win_improvement = results['correct_sign_percentage'] - all_results[baseline_name]['correct_sign_percentage']
+            print(f"  vs baseline: MAE {mae_improvement:+.0f}, Spearman {spearman_improvement:+.3f}, Win% {win_improvement:+.1f}")
+    
+    # Print table summary
+    print("\n" + "="*50)
+    print("SUMMARY TABLE")
+    print("="*50)
+    
+    # Table header
+    print(f"{'Model':<25} {'MAE':>6} {'RMSE':>6} {'Spearman':>8} {'Pearson':>8} {'Win%':>6} {'N':>8}")
+    print("-" * 80)
+    
+    # Sort models with baseline first, then alphabetically
+    sorted_models = sorted(all_results.items(), key=lambda x: (x[0] != baseline_name, x[0]))
+    
+    for func_name, results in sorted_models:
+        is_baseline = func_name == baseline_name
+        name_display = f"{func_name}{'*' if is_baseline else ''}"
         
-        print("  WITHOUT mates:")
-        print(f"    Mean Absolute Error: {results['without_mates']['mae']:.2f} centipawns")
-        print(f"    Spearman correlation: {results['without_mates']['spearman_correlation']:.3f}")
-        print(f"    Correct winner prediction: {results['without_mates']['correct_sign_percentage']:.1f}%")
-        
-        if not is_baseline and baseline_name in all_results:
-            mae_improvement = all_results[baseline_name]['without_mates']['mae'] - results['without_mates']['mae']
-            spearman_improvement = results['without_mates']['spearman_correlation'] - all_results[baseline_name]['without_mates']['spearman_correlation']
-            win_improvement = results['without_mates']['correct_sign_percentage'] - all_results[baseline_name]['without_mates']['correct_sign_percentage']
-            print(f"    vs baseline: MAE {mae_improvement:+.0f}, Spearman {spearman_improvement:+.3f}, Win% {win_improvement:+.1f}")
+        print(f"{name_display:<25} "
+              f"{results['mae']:>6.0f} "
+              f"{results['rmse']:>6.0f} "
+              f"{results['spearman_correlation']:>8.3f} "
+              f"{results['pearson_correlation']:>8.3f} "
+              f"{results['correct_sign_percentage']:>6.1f} "
+              f"{results['num_evaluated']:>8,}")
+    
+    print("\n* = baseline model")

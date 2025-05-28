@@ -23,18 +23,12 @@ from learning.eval_common import (
 from learning.feature_extraction import extract_features_basic, extract_features_piece_square
 
 # Import neural network loader
-try:
-    # Import from the correct module name (4-train-neural-network)
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("train_neural_network", 
-                                                  os.path.join(os.path.dirname(__file__), "40-train-neural-network.py"))
-    train_neural_network = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(train_neural_network)
-    load_neural_network_eval = train_neural_network.load_neural_network_eval
-    PYTORCH_AVAILABLE = True
-except ImportError:
-    PYTORCH_AVAILABLE = False
-    print("PyTorch not available - neural network models will be skipped")
+import importlib.util
+spec = importlib.util.spec_from_file_location("train_neural_network", 
+                                              os.path.join(os.path.dirname(__file__), "40-train-neural-network.py"))
+train_neural_network = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(train_neural_network)
+load_neural_network_eval = train_neural_network.load_neural_network_eval
 
 
 def load_random_forest_eval(model_path: str) -> Callable[[chess.Board], tuple[int, bool]]:
@@ -66,27 +60,9 @@ def load_random_forest_eval(model_path: str) -> Callable[[chess.Board], tuple[in
     return random_forest_eval
 
 
-def main(num_samples: int = 2000) -> None:
-    """
-    Evaluate chess evaluation functions.
-    Uses the first positions from the dataset for evaluation.
-    
-    Args:
-        num_samples: Number of positions to evaluate (default: 2000)
-    """
-    # Define evaluation functions
-    baseline_name = 'piece_value_eval'
-    
-    # Start with hardcoded functions
-    all_functions = [
-        (piece_value_eval, 'piece_value_eval'),
-        (piece_position_eval, 'piece_position_eval'),
-    ]
-    
-    # Load all trained models
-    model_dir = os.path.dirname(__file__)
-    
-    # Load Random Forest models
+def load_random_forest_models(model_dir: str) -> list[tuple[Callable, str]]:
+    """Load all Random Forest models from the model directory."""
+    models = []
     rf_model_files = sorted([f for f in os.listdir(model_dir) if f.startswith('random_forest_chess_model_') and f.endswith('.pkl')])
     
     if rf_model_files:
@@ -105,31 +81,64 @@ def main(num_samples: int = 2000) -> None:
             model_path = os.path.join(model_dir, model_file)
             print(f"  Loading {model_file}...")
             rf_eval = load_random_forest_eval(model_path)
-            all_functions.append((rf_eval, model_name))
+            models.append((rf_eval, model_name))
     else:
         print("No Random Forest models found.")
     
-    # Load Neural Network models if PyTorch is available
-    if PYTORCH_AVAILABLE:
-        nn_model_files = sorted([f for f in os.listdir(model_dir) if f.startswith('neural_network_chess_model_') and f.endswith('.pkl')])
-        
-        if nn_model_files:
-            print(f"\nFound {len(nn_model_files)} Neural Network models:")
-            for model_file in nn_model_files:
-                # Extract info from filename
-                # Format: neural_network_chess_model_<size>_<suffix>.pkl
-                parts = model_file.replace('neural_network_chess_model_', '').replace('.pkl', '').split('_')
-                if len(parts) >= 2:
-                    model_name = f'nn_{parts[0]}_{parts[1]}'
-                else:
-                    model_name = f'nn_{parts[0]}'
-                
-                model_path = os.path.join(model_dir, model_file)
-                print(f"  Loading {model_file}...")
-                nn_eval = load_neural_network_eval(model_path)
-                all_functions.append((nn_eval, model_name))
-        else:
-            print("No Neural Network models found.")
+    return models
+
+
+def load_neural_network_models(model_dir: str) -> list[tuple[Callable, str]]:
+    """Load all Neural Network models from the model directory."""
+    models = []
+    nn_model_files = sorted([f for f in os.listdir(model_dir) if f.startswith('neural_network_chess_model_') and f.endswith('.pkl')])
+    
+    if nn_model_files:
+        print(f"\nFound {len(nn_model_files)} Neural Network models:")
+        for model_file in nn_model_files:
+            # Extract info from filename
+            # Format: neural_network_chess_model_<size>_<suffix>.pkl
+            parts = model_file.replace('neural_network_chess_model_', '').replace('.pkl', '').split('_')
+            if len(parts) >= 2:
+                model_name = f'nn_{parts[0]}_{parts[1]}'
+            else:
+                model_name = f'nn_{parts[0]}'
+            
+            model_path = os.path.join(model_dir, model_file)
+            print(f"  Loading {model_file}...")
+            nn_eval = load_neural_network_eval(model_path)
+            models.append((nn_eval, model_name))
+    else:
+        print("No Neural Network models found.")
+    
+    return models
+
+
+def main(num_samples: int = 5000) -> None:
+    """
+    Evaluate chess evaluation functions.
+    Uses the first positions from the dataset for evaluation.
+    
+    Args:
+        num_samples: Number of positions to evaluate
+    """
+    # Define evaluation functions
+    baseline_name = 'piece_value_eval'
+    
+    # Start with hardcoded functions
+    all_functions = [
+        (piece_value_eval, 'piece_value_eval'),
+        (piece_position_eval, 'piece_position_eval'),
+    ]
+    
+    # Load all trained models
+    model_dir = os.path.dirname(__file__)
+    
+    # Load Random Forest models
+    all_functions.extend(load_random_forest_models(model_dir))
+    
+    # Load Neural Network models
+    all_functions.extend(load_neural_network_models(model_dir))
     
     if len(all_functions) == 2:  # Only baseline functions
         print("\nNo trained models found. Evaluating only hardcoded functions.")
@@ -168,4 +177,4 @@ def main(num_samples: int = 2000) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main(10_000)

@@ -6,6 +6,8 @@ Extracted from 2-eval-accuracy.py to avoid code duplication.
 import chess
 import pandas as pd
 from typing import Any
+import random
+from tqdm import tqdm
 
 
 def create_board_from_fen(fen: str) -> chess.Board:

@@ -41,14 +41,25 @@ See `2-eval-accuracy.py`
 
 eval functions should have the signature: `chess.Board -> centipawn score (max 20k)`
 
-
-
-
+What am I actually optimizing for?
+- centipawn loss mean absolute error (MAE): average error
+- cp root mean square error (RMSE): same units as cps, but weights extreme differences more.
+  - this is probably less important, because distinguishing closely related options is more important
+  - BUT I'll probably still use this as my loss function for the NN because it's most standard.
+- Spearman correlation: is the ranking of different options correct?
+- winner prediction: is advantage positive or negative?
 
 
 ### Results
 - `piece_value_eval()` just sums up the value of material
 - `piece_position_eval()` heuristic that uses positions of pieces
+
+```
+Model                        MAE   RMSE Spearman  Pearson   Win%        N
+-------------------------------------------------------------------------
+piece_value_eval*           2041   5827    0.375    0.387   47.4    9,590
+piece_position_eval         2051   5821    0.339    0.391   57.3    9,590
+```
 
 
 ## Value Model Training
