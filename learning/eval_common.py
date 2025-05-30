@@ -11,6 +11,7 @@ from collections.abc import Callable
 from typing import Any
 from scipy.stats import spearmanr
 from tqdm import tqdm
+import time
 
 
 def evaluate_all_functions(
@@ -36,12 +37,18 @@ def evaluate_all_functions(
     for eval_func, func_name in eval_functions:
         print(f"\nEvaluating {func_name}...")
 
-        # Evaluate all positions
+        # Evaluate all positions with timing
         print(f"  Running {func_name} on {len(processed_df)} positions...")
+        start_time = time.time()
         tqdm.pandas(desc=f"  {func_name}")
         processed_df["prediction"] = processed_df["board"].progress_apply(
             lambda board: eval_func(board)[0]
         )
+        end_time = time.time()
+        evaluation_time = end_time - start_time
+        runs_per_second = len(processed_df) / evaluation_time
+        runs_per_second_k = round(runs_per_second / 1000)
+        print(f"  Completed in {evaluation_time:.2f}s ({runs_per_second_k}k runs/s)")
 
         # Calculate metrics
         predictions = processed_df["prediction"].values
@@ -56,6 +63,21 @@ def evaluate_all_functions(
         correct_sign = (
             np.sum((predictions > 0) == (true_values > 0)) / len(predictions) * 100
         )
+        
+        # Calculate metrics for subset where abs(true_score) < 1000
+        subset_mask = np.abs(true_values) < 1000
+        subset_predictions = predictions[subset_mask]
+        subset_true_values = true_values[subset_mask]
+        subset_is_mate = is_mate[subset_mask]
+        
+        subset_mae = mean_absolute_error(subset_true_values, subset_predictions)
+        subset_mse = mean_squared_error(subset_true_values, subset_predictions)
+        subset_rmse = np.sqrt(subset_mse)
+        subset_pearson = np.corrcoef(subset_predictions, subset_true_values)[0, 1]
+        subset_spearman, _ = spearmanr(subset_predictions, subset_true_values)
+        subset_correct_sign = (
+            np.sum((subset_predictions > 0) == (subset_true_values > 0)) / len(subset_predictions) * 100
+        )
 
         # Store results
         all_results[func_name] = {
@@ -69,6 +91,17 @@ def evaluate_all_functions(
             "mate_positions": is_mate.sum(),
             "predictions": predictions,
             "true_values": true_values,
+            "evaluation_time": evaluation_time,
+            "runs_per_second": runs_per_second,
+            # Subset metrics for abs(true_score) < 1000
+            "subset_mae": subset_mae,
+            "subset_mse": subset_mse,
+            "subset_rmse": subset_rmse,
+            "subset_pearson_correlation": subset_pearson,
+            "subset_spearman_correlation": subset_spearman,
+            "subset_correct_sign_percentage": subset_correct_sign,
+            "subset_num_evaluated": len(subset_predictions),
+            "subset_mate_positions": subset_is_mate.sum(),
         }
 
     return all_results
@@ -102,6 +135,13 @@ def create_combined_scatter_plot(
         ax_full.plot(
             [min_val, max_val], [min_val, max_val], "r--", label="Perfect prediction"
         )
+        
+        # Add correlation fit line
+        coeffs = np.polyfit(true_values, predictions, 1)
+        fit_line = np.poly1d(coeffs)
+        x_fit = np.array([min_val, max_val])
+        y_fit = fit_line(x_fit)
+        ax_full.plot(x_fit, y_fit, "b:", linewidth=2, label="Linear fit")
 
         ax_full.set_xlabel("True Score (Stockfish centipawns)", fontsize=12)
         ax_full.set_ylabel("Predicted Score (centipawns)", fontsize=12)
@@ -153,6 +193,14 @@ def create_combined_scatter_plot(
 
         # Add diagonal line for zoomed view
         ax_zoom.plot([-1000, 1000], [-1000, 1000], "r--", label="Perfect prediction")
+        
+        # Add correlation fit line for zoomed view
+        if len(predictions_zoom) > 1:
+            coeffs_zoom = np.polyfit(true_values_zoom, predictions_zoom, 1)
+            fit_line_zoom = np.poly1d(coeffs_zoom)
+            x_fit_zoom = np.array([-1000, 1000])
+            y_fit_zoom = fit_line_zoom(x_fit_zoom)
+            ax_zoom.plot(x_fit_zoom, y_fit_zoom, "b:", linewidth=2, label="Linear fit")
 
         ax_zoom.set_xlim(-1000, 1000)
         ax_zoom.set_ylim(-1000, 1000)
@@ -217,6 +265,14 @@ def print_results_summary(
             f"  Positions evaluated: {results['num_evaluated']:,} "
             f"(including {results['mate_positions']:,} mate positions)"
         )
+        runs_per_second_k = round(results['runs_per_second'] / 1000)
+        print(f"  Evaluation time: {results['evaluation_time']:.2f}s ({runs_per_second_k}k runs/s)")
+        
+        # Print subset results for abs(true_score) < 1000
+        print(f"\n  Subset (|score| < 1000cp): {results['subset_num_evaluated']:,} positions")
+        print(f"    MAE: {results['subset_mae']:.2f} centipawns")
+        print(f"    Spearman correlation: {results['subset_spearman_correlation']:.3f}")
+        print(f"    Correct winner prediction: {results['subset_correct_sign_percentage']:.1f}%")
 
         if not is_baseline and baseline_name in all_results:
             mae_improvement = all_results[baseline_name]["mae"] - results["mae"]
@@ -232,17 +288,34 @@ def print_results_summary(
                 f"  vs baseline: MAE {mae_improvement:+.0f}, "
                 f"Spearman {spearman_improvement:+.3f}, Win% {win_improvement:+.1f}"
             )
+            
+            # Print subset improvements
+            subset_mae_improvement = (
+                all_results[baseline_name]["subset_mae"] - results["subset_mae"]
+            )
+            subset_spearman_improvement = (
+                results["subset_spearman_correlation"]
+                - all_results[baseline_name]["subset_spearman_correlation"]
+            )
+            subset_win_improvement = (
+                results["subset_correct_sign_percentage"]
+                - all_results[baseline_name]["subset_correct_sign_percentage"]
+            )
+            print(
+                f"    subset vs baseline: MAE {subset_mae_improvement:+.0f}, "
+                f"Spearman {subset_spearman_improvement:+.3f}, Win% {subset_win_improvement:+.1f}"
+            )
 
     # Print table summary
     print("\n" + "=" * 50)
-    print("SUMMARY TABLE")
+    print("SUMMARY TABLE (All Positions)")
     print("=" * 50)
 
     # Table header
     print(
-        f"{'Model':<25} {'MAE':>6} {'RMSE':>6} {'Spearman':>8} {'Pearson':>8} {'Win%':>6} {'N':>8}"
+        f"{'Model':<25} {'MAE':>6} {'RMSE':>6} {'Spearman':>8} {'Pearson':>8} {'Win%':>6} {'k runs/s':>8} {'N':>8}"
     )
-    print("-" * 80)
+    print("-" * 90)
 
     # Sort models with baseline first, then alphabetically
     sorted_models = sorted(
@@ -253,6 +326,7 @@ def print_results_summary(
         is_baseline = func_name == baseline_name
         name_display = f"{func_name}{'*' if is_baseline else ''}"
 
+        runs_per_second_k = round(results['runs_per_second'] / 1000)
         print(
             f"{name_display:<25} "
             f"{results['mae']:>6.0f} "
@@ -260,7 +334,37 @@ def print_results_summary(
             f"{results['spearman_correlation']:>8.3f} "
             f"{results['pearson_correlation']:>8.3f} "
             f"{results['correct_sign_percentage']:>6.1f} "
+            f"{runs_per_second_k:>8} "
             f"{results['num_evaluated']:>8,}"
         )
 
+    print("\n* = baseline model")
+    
+    # Add subset table for abs(true_score) < 1000
+    print("\n" + "=" * 50)
+    print("SUMMARY TABLE (|Score| < 1000cp Subset)")
+    print("=" * 50)
+    
+    # Subset table header
+    print(
+        f"{'Model':<25} {'MAE':>6} {'RMSE':>6} {'Spearman':>8} {'Pearson':>8} {'Win%':>6} {'k runs/s':>8} {'N':>8}"
+    )
+    print("-" * 90)
+    
+    for func_name, results in sorted_models:
+        is_baseline = func_name == baseline_name
+        name_display = f"{func_name}{'*' if is_baseline else ''}"
+        
+        runs_per_second_k = round(results['runs_per_second'] / 1000)
+        print(
+            f"{name_display:<25} "
+            f"{results['subset_mae']:>6.0f} "
+            f"{results['subset_rmse']:>6.0f} "
+            f"{results['subset_spearman_correlation']:>8.3f} "
+            f"{results['subset_pearson_correlation']:>8.3f} "
+            f"{results['subset_correct_sign_percentage']:>6.1f} "
+            f"{runs_per_second_k:>8} "
+            f"{results['subset_num_evaluated']:>8,}"
+        )
+    
     print("\n* = baseline model")

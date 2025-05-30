@@ -57,15 +57,22 @@ What am I actually optimizing for?
 - `piece_position_eval()` heuristic that uses positions of pieces
 
 ```
-Model                        MAE   RMSE Spearman  Pearson   Win%        N
--------------------------------------------------------------------------
-piece_value_eval*           2041   5827    0.375    0.387   47.4    9,590
-piece_position_eval         2051   5821    0.339    0.391   57.3    9,590
+Model                        MAE   RMSE Spearman  Pearson   Win%      k/s        N
+------------------------------------------------------------------------------------------
+piece_value_eval*           2041   5827    0.375    0.387   47.4      133    9,590
+piece_position_eval         2051   5821    0.339    0.391   57.3       94    9,590
+
+(|Score| < 1000cp Subset)
+==================================================
+Model                        MAE   RMSE Spearman  Pearson   Win%      k/s        N
+------------------------------------------------------------------------------------------
+piece_value_eval*            119    204    0.272    0.342   43.1      133    8,523
+piece_position_eval          132    206    0.235    0.379   54.4       93    8,523
 ```
 
 ### Evaluation TODOs
-[ ] measure time
-[ ] measure scores when only tested on data < 1k
+[x] measure time
+[x] measure scores when only tested on data < 1k
 
 ## Value Model Training
 

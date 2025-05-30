@@ -2,31 +2,40 @@
 
 """
 Evaluate the accuracy of chess evaluation functions using the Lichess position evaluations dataset.
-Always uses the first 10,000 positions for evaluation.
+
+Usage:
+    20-eval-accuracy.py [--num-samples=<n>] [--graphs]
+    20-eval-accuracy.py -h | --help
+
+Options:
+    --num-samples=<n>   Number of positions to evaluate [default: 10000]
+    --graphs            Show scatter plots
+    -h --help           Show this screen
 """
 
-from datasets import load_dataset
+# Import neural network loader
+import importlib.util
 import os
 import pickle
 from collections.abc import Callable
-import chess
 
-from core.eval import piece_value_eval, piece_position_eval
+import chess
+from datasets import load_dataset
+from docopt import docopt
+
+from core.eval import piece_position_eval, piece_value_eval
 
 # Import helper functions
 from learning.eval_accuracy_helpers import process_dataset_batch
 from learning.eval_common import (
-    evaluate_all_functions,
     create_combined_scatter_plot,
+    evaluate_all_functions,
     print_results_summary,
 )
 from learning.feature_extraction import (
     extract_features_basic,
     extract_features_piece_square,
 )
-
-# Import neural network loader
-import importlib.util
 
 spec = importlib.util.spec_from_file_location(
     "train_neural_network",
@@ -111,8 +120,8 @@ def load_linear_piece_square_eval(
 ) -> Callable[[chess.Board], tuple[int, bool]]:
     """Load the trained linear piece-square model and return an evaluation function."""
     # Import the module containing LinearPieceSquareModel
-    import sys
     import importlib.util
+    import sys
 
     # Load the module
     module_path = os.path.join(
@@ -216,13 +225,14 @@ def load_neural_network_models(model_dir: str) -> list[tuple[Callable, str]]:
     return models
 
 
-def main(num_samples: int = 5000) -> None:
+def main(num_samples: int = 5000, graphs: bool = False) -> None:
     """
     Evaluate chess evaluation functions.
     Uses the first positions from the dataset for evaluation.
 
     Args:
         num_samples: Number of positions to evaluate
+        graphs: Whether to show scatter plots
     """
     # Define evaluation functions
     baseline_name = "piece_value_eval"
@@ -277,9 +287,15 @@ def main(num_samples: int = 5000) -> None:
     print_results_summary(all_results, baseline_name)
 
     # Create combined scatter plot
-    print("\nCreating scatter plots...")
-    create_combined_scatter_plot(all_results, baseline_name)
+    if graphs:
+        print("\nCreating scatter plots...")
+        create_combined_scatter_plot(all_results, baseline_name)
 
 
 if __name__ == "__main__":
-    main(10_000)
+    arguments = docopt(__doc__)
+
+    num_samples = int(arguments["--num-samples"])
+    graphs = arguments["--graphs"]
+
+    main(num_samples, graphs)

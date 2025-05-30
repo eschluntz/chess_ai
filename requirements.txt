@@ -13,3 +13,4 @@ widgetsnbextension
 matplotlib
 scikit-learn
 torch
+docopt
