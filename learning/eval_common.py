@@ -31,10 +31,6 @@ def evaluate_all_functions(
     """
     all_results = {}
 
-    # Create board objects once
-    print(f"Creating chess boards for {len(processed_df)} positions...")
-    processed_df["board"] = processed_df["fen"].apply(lambda fen: chess.Board(fen))
-
     for eval_func, func_name in eval_functions:
         print(f"\nEvaluating {func_name}...")
 

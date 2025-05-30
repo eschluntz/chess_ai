@@ -20,13 +20,12 @@ import pickle
 from collections.abc import Callable
 
 import chess
-from datasets import load_dataset
 from docopt import docopt
 
 from core.eval import piece_position_eval, piece_value_eval
 
 # Import helper functions
-from learning.eval_accuracy_helpers import process_dataset_batch
+from learning.eval_accuracy_helpers import get_eval_df
 from learning.eval_common import (
     create_combined_scatter_plot,
     evaluate_all_functions,
@@ -258,25 +257,9 @@ def main(num_samples: int = 5000, graphs: bool = False) -> None:
     if len(all_functions) == 2:  # Only baseline functions
         print("\nNo trained models found. Evaluating only hardcoded functions.")
 
-    # Load the streaming dataset
-    print("Loading Lichess chess position evaluations dataset (streaming)...")
-    ds_full = load_dataset("Lichess/chess-position-evaluations", streaming=True)
-
-    # Process the first N positions (reserved for evaluation)
-    print(f"\nProcessing first {num_samples} positions (evaluation set)...")
-    dataset_stream = ds_full["train"]
-
-    processed_df, stats = process_dataset_batch(
-        dataset_stream.take(num_samples), num_samples
-    )
-
-    # Print data stats
-    print("\nData statistics:")
-    print(f"  Total positions loaded: {stats['total_loaded']}")
-    print(f"  Total positions after filtering: {len(processed_df)}")
-    print(f"  Mate positions: {stats['mate_positions']}")
-    print(f"  Non-mate positions: {len(processed_df) - stats['mate_positions']}")
-    print(f"  Total filtered out: {stats['total_filtered']}")
+    # Get evaluation data from the canonical shuffled dataset
+    print(f"\nGetting {num_samples} evaluation positions from shuffled dataset...")
+    processed_df = get_eval_df(num_samples)
 
     # Evaluate all functions on the same data
     print("\n" + "=" * 50)

@@ -14,3 +14,4 @@ matplotlib
 scikit-learn
 torch
 docopt
+hf_xet

@@ -35,6 +35,9 @@ Backup datasets:
 ### sanity checks on data 
 [x] test a very positive and very negative data points, and make sure my baseline agrees with the sign.
 
+### Time alignment
+There's BIG changes in the distribution over time, so I'm shuffling the first 1M values and drawing everything from there.
+
 ## Board Evaluation
 
 See `2-eval-accuracy.py`
@@ -80,10 +83,12 @@ optional extra features:
 - 8x8 binary grid of all squares under attack for each side?
 
 ### model 0: Learning a piece value table
-[x] basics
+[ ] sanity check and understand feature extraction
 [ ] is what's printed out including the base value of the piece?
 [ ] fix formatting of printed out tables (values too big)
-[ ] print out the average magnitude of the learned values, or some other measure of how extreme they are?
+
+
+
 [ ] pick the best value for alpha
 [ ] add it to 20-eval-accuracy
 [ ] add a function to core/eval.py that uses it

@@ -9,118 +9,169 @@ import chess
 import pandas as pd
 from datasets import load_dataset
 
+# Cache for the raw shuffled dataset (before expensive processing)
+_raw_shuffled_cache = None
 
-def get_training_dataset_stream(skip_first_n=10000):
+# Global constant for evaluation set size
+EVAL_SET_SIZE = 10000
+
+
+def get_raw_shuffled_data() -> pd.DataFrame:
     """
-    Get the Lichess dataset stream for training, skipping the first N positions.
-    
-    The first 10k positions are reserved for evaluation to avoid data leakage.
-    
-    Args:
-        skip_first_n: Number of positions to skip (default: 10000)
-        
-    Returns:
-        Dataset stream starting after the skipped positions
+    Get the raw shuffled dataset with minimal processing.
+    Uses a cached parquet file if available, otherwise creates it from streaming data.
     """
+    global _raw_shuffled_cache
+    import os
+
+    # Check if we already have the raw data cached in memory
+    if _raw_shuffled_cache is not None:
+        print("Using cached raw shuffled dataset from memory")
+        return _raw_shuffled_cache
+
+    # Check if we have a saved parquet file
+    cache_file = "learning/cache/shuffled_1m_dataset.parquet"
+
+    if os.path.exists(cache_file):
+        print(f"Loading shuffled dataset from cache file: {cache_file}")
+        train_df = pd.read_parquet(cache_file)
+
+        # Cache in memory too
+        _raw_shuffled_cache = train_df
+        return train_df
+
+    # Need to create the cached file
+    print("No cached file found. Creating shuffled dataset from streaming data...")
+
+    # Always load 1M positions from the beginning using streaming
+    pool_size = 1_000_000
+
+    print(f"Streaming first {pool_size:,} positions...")
     ds = load_dataset("Lichess/chess-position-evaluations", streaming=True)
-    return ds["train"].skip(skip_first_n)
+    train_data = list(ds["train"].take(pool_size))
+
+    # Convert to pandas and basic cleanup
+    print("Converting to pandas and basic cleanup...")
+    train_df = pd.DataFrame(train_data)
+    train_df = train_df.dropna(subset=["fen"])
+
+    # Shuffle the raw dataframe to remove temporal bias
+    print("Shuffling raw data to remove temporal bias...")
+    train_df = train_df.sample(frac=1.0, random_state=42).reset_index(drop=True)
+
+    # Save to parquet for future use
+    print(f"Saving shuffled dataset to cache file: {cache_file}")
+    os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+    train_df.to_parquet(cache_file, index=False)
+
+    print("Dataset preparation complete. Future runs will load from cache much faster.")
+
+    # Cache the result in memory
+    _raw_shuffled_cache = train_df
+
+    return _raw_shuffled_cache
 
 
-def get_train_df(
-    num_train_samples: int,
-    skip_first_n: int = 10000,
+def process_subset(
+    raw_df: pd.DataFrame,
     include_mates: bool = True,
     max_mate_distance: int = 15,
     max_cp: int = 750,
 ) -> pd.DataFrame:
     """
-    Get preprocessed training data as a DataFrame with chess boards and scores.
-    
-    To avoid temporal bias, this function loads 1M positions, shuffles them,
-    and then samples the requested number.
-    
-    Args:
-        num_train_samples: Number of training samples to return
-        skip_first_n: Number of positions to skip (default: 10000)
-        include_mates: Whether to include mate positions (default: True)
-        max_mate_distance: Maximum mate distance to include (default: 15)
-        max_cp: Maximum centipawn value to include (default: 750)
-        
-    Returns:
-        DataFrame with columns: ['fen', 'true_score', 'board']
+    Process a subset of raw data with filtering, score extraction, and board creation.
     """
-    import time
-    
-    start_time = time.time()
-    
-    # Always load 1M positions to create a large pool
-    pool_size = 1_000_000
-    print(f"Loading {pool_size:,} positions to create shuffled pool...")
-    load_start = time.time()
-    train_stream = get_training_dataset_stream(skip_first_n)
-    train_data = list(train_stream.take(pool_size))
-    load_time = time.time() - load_start
-    print(f"  Loading took {load_time:.2f} seconds")
-
-    # Process training data
-    print("Processing training data...")
-    process_start = time.time()
-    train_df = pd.DataFrame(train_data)
-    train_df = train_df.dropna(subset=["fen"])
-    dataframe_time = time.time() - process_start
-    print(f"  DataFrame creation took {dataframe_time:.2f} seconds")
-
     # Filter positions
-    filter_start = time.time()
-    train_df["should_skip"] = train_df.apply(
+    raw_df["should_skip"] = raw_df.apply(
         lambda row: should_skip_position(
-            row, 
+            row,
             include_mates=include_mates,
             max_mate_distance=max_mate_distance,
-            max_cp=max_cp
-        ), 
-        axis=1
+            max_cp=max_cp,
+        ),
+        axis=1,
     )
-    train_df = train_df[~train_df["should_skip"]].copy()
-    filter_time = time.time() - filter_start
-    print(f"  Filtering took {filter_time:.2f} seconds")
+    filtered_df = raw_df[~raw_df["should_skip"]].copy()
 
     # Extract scores and create boards
-    score_start = time.time()
-    train_df["true_score"] = train_df.apply(extract_centipawn_score, axis=1)
-    score_time = time.time() - score_start
-    print(f"  Score extraction took {score_time:.2f} seconds")
-    
-    board_start = time.time()
-    train_df["board"] = train_df["fen"].apply(create_board_from_fen)
-    board_time = time.time() - board_start
-    print(f"  Board creation took {board_time:.2f} seconds")
+    filtered_df["true_score"] = filtered_df.apply(extract_centipawn_score, axis=1)
+    filtered_df["board"] = filtered_df["fen"].apply(create_board_from_fen)
 
-    print(f"Filtered to {len(train_df)} valid positions")
-    
-    # Shuffle the dataframe to remove temporal bias
-    print("Shuffling data to remove temporal bias...")
-    shuffle_start = time.time()
-    train_df = train_df.sample(frac=1.0, random_state=42).reset_index(drop=True)
-    shuffle_time = time.time() - shuffle_start
-    print(f"  Shuffling took {shuffle_time:.2f} seconds")
-    
-    # Sample the requested number of positions
-    sample_start = time.time()
-    if num_train_samples > len(train_df):
-        print(f"Warning: Requested {num_train_samples:,} samples but only {len(train_df):,} available")
-        sampled_df = train_df
+    # Add is_mate column for compatibility with eval_common.py
+    filtered_df["is_mate"] = filtered_df["mate"].notna()
+
+    print(
+        f"Processed {len(raw_df)} raw positions -> {len(filtered_df)} valid positions"
+    )
+
+    return filtered_df[["fen", "true_score", "board", "is_mate"]]
+
+
+def get_eval_df(num_samples: int = EVAL_SET_SIZE, **kwargs) -> pd.DataFrame:
+    """
+    Get evaluation data - first N samples from the shuffled dataset.
+    Only processes the subset we actually need.
+
+    Args:
+        num_samples: Number of samples for evaluation (default: EVAL_SET_SIZE)
+        **kwargs: Additional arguments passed to process_subset
+
+    Returns:
+        DataFrame with evaluation data
+    """
+    # Get raw shuffled data
+    raw_df = get_raw_shuffled_data()
+
+    if num_samples > len(raw_df):
+        print(
+            f"Warning: Requested {num_samples:,} samples but only {len(raw_df):,} available"
+        )
+        raw_subset = raw_df
     else:
-        sampled_df = train_df.head(num_train_samples)
-        print(f"Sampled {num_train_samples:,} positions from shuffled pool")
-    sample_time = time.time() - sample_start
-    print(f"  Sampling took {sample_time:.2f} seconds")
-    
-    total_time = time.time() - start_time
-    print(f"Total get_train_df time: {total_time:.2f} seconds")
-    
-    # Return only the columns needed for training
-    return sampled_df[["fen", "true_score", "board"]]
+        raw_subset = raw_df.head(num_samples)
+
+    print(f"Processing first {len(raw_subset):,} positions for evaluation...")
+
+    # Process only the subset we need
+    eval_df = process_subset(raw_subset, **kwargs)
+
+    return eval_df
+
+
+def get_train_df(num_train_samples: int, **kwargs) -> pd.DataFrame:
+    """
+    Get training data - samples after the first EVAL_SET_SIZE from the shuffled dataset.
+    Only processes the subset we actually need.
+
+    Args:
+        num_train_samples: Number of training samples to return
+        **kwargs: Additional arguments passed to process_subset
+
+    Returns:
+        DataFrame with training data
+    """
+    # Get raw shuffled data
+    raw_df = get_raw_shuffled_data()
+
+    # Skip first EVAL_SET_SIZE (reserved for evaluation)
+    available_for_training = len(raw_df) - EVAL_SET_SIZE
+
+    if num_train_samples > available_for_training:
+        print(
+            f"Warning: Requested {num_train_samples:,} training samples but only {available_for_training:,} available after reserving {EVAL_SET_SIZE:,} for evaluation"
+        )
+        raw_subset = raw_df[EVAL_SET_SIZE:]
+    else:
+        raw_subset = raw_df[EVAL_SET_SIZE : EVAL_SET_SIZE + num_train_samples]
+
+    print(
+        f"Processing {len(raw_subset):,} positions for training (after skipping {EVAL_SET_SIZE:,} for evaluation)..."
+    )
+
+    # Process only the subset we need
+    train_df = process_subset(raw_subset, **kwargs)
+
+    return train_df
 
 
 def create_board_from_fen(fen: str) -> chess.Board:
@@ -195,62 +246,3 @@ def extract_centipawn_score(example: dict[str, Any]) -> int:
     else:
         # Return cp value, or 0 if it's missing (should be rare after filtering)
         return example.get("cp", 0)
-
-
-def process_dataset_batch(
-    dataset_stream: Any,
-    num_samples: int,
-    max_mate_distance: int = 15,
-    max_cp: int = 750,
-) -> tuple[pd.DataFrame, dict[str, int]]:
-    """
-    Process dataset and return filtered examples as a DataFrame.
-    Uses functional approach with dataset.take() and DataFrame operations.
-
-    Args:
-        dataset_stream: The streaming dataset
-        num_samples: Number of samples to process
-        max_mate_distance: Maximum mate distance to include (default: 15)
-        max_cp: Maximum centipawn value to include (default: 750)
-
-    Returns:
-        tuple: (processed_df, stats_dict)
-    """
-    # Load data using take()
-    print(f"Loading {num_samples} positions...")
-    data = list(dataset_stream.take(num_samples))
-
-    # Convert to DataFrame
-    df = pd.DataFrame(data)
-    initial_count = len(df)
-
-    # First, filter out any rows with NaN values in critical columns
-    df = df.dropna(subset=["fen"])
-
-    # Apply filtering using the helper function (always include mates for processing)
-    df["should_skip"] = df.apply(
-        lambda row: should_skip_position(
-            row, include_mates=True, max_mate_distance=max_mate_distance, max_cp=max_cp
-        ),
-        axis=1,
-    )
-
-    # Filter out skipped positions
-    df_filtered = df[~df["should_skip"]].copy()
-
-    # Add true score and metadata for remaining positions
-    df_filtered["true_score"] = df_filtered.apply(extract_centipawn_score, axis=1)
-    df_filtered["is_mate"] = df_filtered["mate"].notna()
-
-    # Calculate simple stats
-    stats = {
-        "total_loaded": initial_count,
-        "total_filtered": initial_count - len(df_filtered),
-        "mate_positions": df_filtered["is_mate"].sum(),
-        "total_processed": len(df_filtered),
-    }
-
-    # Return only needed columns
-    processed_df = df_filtered[["fen", "true_score", "is_mate"]]
-
-    return processed_df, stats
