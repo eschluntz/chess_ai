@@ -3,8 +3,8 @@
 """
 Contains classical eval functions for chess
 """
-import chess
 
+import chess
 
 CHECKMATE_VALUE = 20_000  # Compatible with mate-to-cp conversion
 
@@ -155,55 +155,60 @@ def piece_position_eval(board):
         for square in board.pieces(piece_type, chess.WHITE):
             score += PIECE_SQUARE_TABLES[piece_type][square] + PIECE_VALUES[piece_type]
         for square in board.pieces(piece_type, chess.BLACK):
-            square = chess.square_mirror(square)  # look at the table from black's perspective
+            square = chess.square_mirror(
+                square
+            )  # look at the table from black's perspective
             score -= PIECE_SQUARE_TABLES[piece_type][square] + PIECE_VALUES[piece_type]
     return score, False
 
 
 # Machine Learning Models
 
+
 def load_linear_piece_square_model(model_path):
     """Load a trained linear piece-square model from disk."""
-    import pickle
-    import os
-    import sys
     import importlib.util
-    
+    import os
+    import pickle
+    import sys
+
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model file not found: {model_path}")
-    
+
     # Load the module containing LinearPieceSquareModel
-    module_path = os.path.join(os.path.dirname(__file__), "..", "learning", "31-train-piece-value-table.py")
+    module_path = os.path.join(
+        os.path.dirname(__file__), "..", "learning", "31-train-piece-value-table.py"
+    )
     spec = importlib.util.spec_from_file_location("__main__", module_path)
     module = importlib.util.module_from_spec(spec)
-    
+
     # The model was saved when running as __main__, so we need to make the class available there
-    old_main = sys.modules.get('__main__')
+    old_main = sys.modules.get("__main__")
     sys.modules["__main__"] = module
-    
+
     try:
         # Execute the module to define the class
         spec.loader.exec_module(module)
-        
+
         # Now load the pickle
-        with open(model_path, 'rb') as f:
+        with open(model_path, "rb") as f:
             model = pickle.load(f)
-            
+
     finally:
         # Restore the original __main__
         if old_main is not None:
             sys.modules["__main__"] = old_main
-    
+
     return model
 
 
 def linear_piece_square_eval(board, model=None, model_path=None):
     """Evaluates the board using a trained linear piece-square model.
-    
+
     board: chess.Board object
     model: Pre-loaded LinearPieceSquareModel instance (optional)
     model_path: Path to saved model file (optional, used if model is None)
-    
+
     Returns:
     score (int): The score of the board. Positive for white's advantage,
     negative for black's.
@@ -213,21 +218,29 @@ def linear_piece_square_eval(board, model=None, model_path=None):
     score, done = _game_over_eval(board)
     if done:
         return (score, done)
-    
+
     # Load model if not provided
     if model is None:
         if model_path is None:
             # Try default path
             import os
-            default_path = os.path.join(os.path.dirname(__file__), '..', 'learning', 'linear_piece_square_model_1000000.pkl')
+
+            default_path = os.path.join(
+                os.path.dirname(__file__),
+                "..",
+                "learning",
+                "linear_piece_square_model_1000000.pkl",
+            )
             if os.path.exists(default_path):
                 model_path = default_path
             else:
-                raise ValueError("No model provided and no default model found. Train a model using learning/31-train-piece-value-table.py")
+                raise ValueError(
+                    "No model provided and no default model found. Train a model using learning/31-train-piece-value-table.py"
+                )
         model = load_linear_piece_square_model(model_path)
-    
+
     # Extract features and predict
     features = model.extract_features(board)
     score = int(model.predict([features])[0])
-    
+
     return score, False

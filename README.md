@@ -1,7 +1,5 @@
 [![Build Status](https://github.com/eschluntz/chess_ai/actions/workflows/run_tests.yml/badge.svg)](https://github.com/eschluntz/chess_ai/actions)
 
-[![codecov](https://codecov.io/gh/eschluntz/chess_ai/graph/badge.svg?token=2ZF9NR8ILO)](https://codecov.io/gh/eschluntz/chess_ai)
-
 # chess_ai
 AI algorithms for chess, including classical, ML, and RL.
 

@@ -8,4 +8,4 @@ flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
 flake8 . --count --statistics
 
 # run actual tests
-pytest tests/
+python -m pytest tests/
