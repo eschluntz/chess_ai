@@ -178,23 +178,34 @@ class LinearPieceSquareModel:
             table = tables[piece_name][color]
             print(f"\n{piece_name} Total Position Values ({color}):")
         
-        print("    a     b     c     d     e     f     g     h")
-        print("  +-----+-----+-----+-----+-----+-----+-----+-----+")
+        print("    a    b    c    d    e    f    g    h")
+        print("  +----+----+----+----+----+----+----+----+")
         
         for rank in range(7, -1, -1):  # Start from rank 8 down to rank 1
             print(f"{rank+1} |", end="")
             for file in range(8):
                 value = table[rank, file]
-                print(f" {value:4.0f}|", end="")
+                # Format with sign for deltas, limit to 3 digits
+                if show_deltas and value >= 0:
+                    print(f" {value:+3.0f}|", end="")
+                else:
+                    print(f" {value:3.0f}|", end="")
             print(f" {rank+1}")
             if rank > 0:
-                print("  +-----+-----+-----+-----+-----+-----+-----+-----+")
+                print("  +----+----+----+----+----+----+----+----+")
         
-        print("  +-----+-----+-----+-----+-----+-----+-----+-----+")
-        print("    a     b     c     d     e     f     g     h")
+        print("  +----+----+----+----+----+----+----+----+")
+        print("    a    b    c    d    e    f    g    h")
+        
+        # Print statistics about the values
+        if show_deltas:
+            abs_values = np.abs(table.flatten())
+            print(f"  Average magnitude: {np.mean(abs_values):.1f} cp")
+            print(f"  Max magnitude: {np.max(abs_values):.1f} cp")
+            print(f"  Std deviation: {np.std(table.flatten()):.1f} cp")
 
 
-def train_linear_piece_square_model(num_train_samples: int = 100000, num_val_samples: int = 20000, alpha: float = 10.0):
+def train_linear_piece_square_model(num_train_samples: int = 100000, num_val_samples: int = 20000, alpha: float = 100.0):
     """Train a linear model to learn piece-square tables."""
     
     print("Loading Lichess chess position evaluations dataset...")
@@ -307,15 +318,66 @@ def train_linear_piece_square_model(num_train_samples: int = 100000, num_val_sam
     with open(model_path, 'wb') as f:
         pickle.dump(model, f)
     
-    return model
+    return model, {'val_mae': final_val_mae, 'val_rmse': final_val_rmse}
 
 
 if __name__ == "__main__":
-    # Try different regularization strengths
-    alphas = [1.0, 10.0, 100.0]
+    import sys
     
-    for alpha in alphas:
-        print(f"\n\n{'='*80}")
-        print(f"Training with regularization alpha={alpha}")
-        print('='*80)
-        model = train_linear_piece_square_model(num_train_samples=100000, num_val_samples=20000, alpha=alpha)
+    if len(sys.argv) > 1 and sys.argv[1] == "sweep":
+        # Try different regularization strengths
+        alphas = [0.1, 1.0, 10.0, 100.0, 1000.0]
+        results = []
+        
+        for alpha in alphas:
+            print(f"\n\n{'='*80}")
+            print(f"Training with regularization alpha={alpha}")
+            print('='*80)
+            model, metrics = train_linear_piece_square_model(num_train_samples=100000, num_val_samples=20000, alpha=alpha)
+            
+            # Get validation performance and magnitude statistics
+            tables, other_features = model.get_piece_square_tables()
+            all_deltas = []
+            for piece_name in ["Pawn", "Knight", "Bishop", "Rook", "Queen", "King"]:
+                deltas = tables[piece_name]['deltas_white'].flatten()
+                all_deltas.extend(deltas)
+            
+            avg_magnitude = np.mean(np.abs(all_deltas))
+            max_magnitude = np.max(np.abs(all_deltas))
+            
+            results.append({
+                'alpha': alpha,
+                'val_mae': metrics['val_mae'],
+                'val_rmse': metrics['val_rmse'],
+                'avg_magnitude': avg_magnitude,
+                'max_magnitude': max_magnitude
+            })
+        
+        # Print summary
+        print("\n\n" + "="*80)
+        print("REGULARIZATION SUMMARY")
+        print("="*80)
+        print(f"{'Alpha':>10} | {'Val MAE':>10} | {'Avg Mag':>10} | {'Max Mag':>10}")
+        print("-"*50)
+        for r in results:
+            print(f"{r['alpha']:>10.1f} | {r['val_mae']:>10.0f} | {r['avg_magnitude']:>10.1f} | {r['max_magnitude']:>10.1f}")
+        
+        # Find best alpha (balance between performance and reasonable magnitudes)
+        # Prefer alpha with low MAE but also reasonable piece-square magnitudes (not too extreme)
+        best_result = min(results, key=lambda x: x['val_mae'])
+        print(f"\nBest validation MAE: {best_result['val_mae']:.0f} cp with alpha={best_result['alpha']}")
+        
+        # Also consider magnitude - very large values might be overfitting
+        reasonable_results = [r for r in results if r['avg_magnitude'] < 50]
+        if reasonable_results:
+            best_reasonable = min(reasonable_results, key=lambda x: x['val_mae'])
+            print(f"Best with reasonable magnitudes (<50 cp avg): alpha={best_reasonable['alpha']} (MAE={best_reasonable['val_mae']:.0f} cp)")
+    else:
+        # Train with optimal settings using more data
+        print("Training linear piece-square model with optimal settings...")
+        print("Using 1M training samples as suggested")
+        model, metrics = train_linear_piece_square_model(
+            num_train_samples=1_000_000, 
+            num_val_samples=50_000, 
+            alpha=100.0  # Good balance between performance and reasonable values
+        )

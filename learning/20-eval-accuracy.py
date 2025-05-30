@@ -88,6 +88,66 @@ def load_random_forest_models(model_dir: str) -> list[tuple[Callable, str]]:
     return models
 
 
+def load_linear_piece_square_eval(model_path: str) -> Callable[[chess.Board], tuple[int, bool]]:
+    """Load the trained linear piece-square model and return an evaluation function."""
+    # Import the module containing LinearPieceSquareModel
+    import sys
+    import importlib.util
+    
+    # Load the module
+    module_path = os.path.join(os.path.dirname(__file__), "31-train-piece-value-table.py")
+    spec = importlib.util.spec_from_file_location("__main__", module_path)
+    module = importlib.util.module_from_spec(spec)
+    
+    # The model was saved when running as __main__, so we need to make the class available there
+    old_main = sys.modules.get('__main__')
+    sys.modules["__main__"] = module
+    
+    try:
+        # Execute the module to define the class
+        spec.loader.exec_module(module)
+        
+        # Now load the pickle
+        with open(model_path, 'rb') as f:
+            model = pickle.load(f)
+            
+    finally:
+        # Restore the original __main__
+        if old_main is not None:
+            sys.modules["__main__"] = old_main
+    
+    def linear_piece_square_eval(board: chess.Board) -> tuple[int, bool]:
+        """Evaluate a position using the trained linear piece-square model."""
+        features = model.extract_features(board)
+        score = int(model.predict([features])[0])
+        return score, False
+    
+    return linear_piece_square_eval
+
+
+def load_linear_models(model_dir: str) -> list[tuple[Callable, str]]:
+    """Load all Linear Piece-Square models from the model directory."""
+    models = []
+    linear_model_files = sorted([f for f in os.listdir(model_dir) if f.startswith('linear_piece_square_model_') and f.endswith('.pkl')])
+    
+    if linear_model_files:
+        print(f"\nFound {len(linear_model_files)} Linear Piece-Square models:")
+        for model_file in linear_model_files:
+            # Extract info from filename
+            # Format: linear_piece_square_model_<size>.pkl
+            parts = model_file.replace('linear_piece_square_model_', '').replace('.pkl', '').split('_')
+            model_name = f'linear_{parts[0]}'
+            
+            model_path = os.path.join(model_dir, model_file)
+            print(f"  Loading {model_file}...")
+            linear_eval = load_linear_piece_square_eval(model_path)
+            models.append((linear_eval, model_name))
+    else:
+        print("No Linear Piece-Square models found.")
+    
+    return models
+
+
 def load_neural_network_models(model_dir: str) -> list[tuple[Callable, str]]:
     """Load all Neural Network models from the model directory."""
     models = []
@@ -136,6 +196,9 @@ def main(num_samples: int = 5000) -> None:
     
     # Load Random Forest models
     all_functions.extend(load_random_forest_models(model_dir))
+    
+    # Load Linear Piece-Square models
+    # all_functions.extend(load_linear_models(model_dir))
     
     # Load Neural Network models
     all_functions.extend(load_neural_network_models(model_dir))
