@@ -234,7 +234,7 @@ def main(num_samples: int = 5000) -> None:
     ]
 
     # Load all trained models
-    model_dir = os.path.dirname(__file__)
+    model_dir = os.path.join(os.path.dirname(__file__), "models")
 
     # Load Random Forest models
     all_functions.extend(load_random_forest_models(model_dir))

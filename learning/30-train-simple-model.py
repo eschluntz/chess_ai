@@ -184,7 +184,7 @@ def train_random_forest_model(
         model_filename = (
             f"random_forest_chess_model_{num_train_samples}_{feature_type}.pkl"
         )
-    model_path = os.path.join(os.path.dirname(__file__), model_filename)
+    model_path = os.path.join(os.path.dirname(__file__), "models", model_filename)
     print(f"\nSaving model to {model_path}...")
     with open(model_path, "wb") as f:
         pickle.dump({"model": model, "feature_type": feature_type}, f)
@@ -254,7 +254,7 @@ if __name__ == "__main__":
     # List to store results for CSV
     results = []
 
-    csv_path = os.path.join(os.path.dirname(__file__), "rf_parameter_sweep_results.csv")
+    csv_path = os.path.join(os.path.dirname(__file__), "data", "rf_parameter_sweep_results.csv")
 
     for i, params in enumerate(experiments, 1):
         print("\n" + "=" * 80)

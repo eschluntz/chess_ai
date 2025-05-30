@@ -20,6 +20,9 @@ python -m venv venv
 source venv/bin/activate
 
 pip install -r requirements.txt
+
+# Install Git hooks (optional, for automatic testing before push)
+./install_scripts/install-hooks.sh
 ```
 
 

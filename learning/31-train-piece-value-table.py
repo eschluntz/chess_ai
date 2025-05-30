@@ -357,6 +357,7 @@ def train_linear_piece_square_model(
     # Save the model
     model_path = os.path.join(
         os.path.dirname(__file__),
+        "models",
         "linear_piece_square_model_{}.pkl".format(num_train_samples),
     )
     print(f"\nSaving model to {model_path}...")

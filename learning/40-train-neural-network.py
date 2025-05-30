@@ -334,7 +334,7 @@ def train_neural_network(
     if plot_live:
         plt.ioff()  # Turn off interactive mode
         plot_filename = f"nn_training_progress_{num_train_samples}_{model_suffix}.png"
-        plot_path = os.path.join(os.path.dirname(__file__), plot_filename)
+        plot_path = os.path.join(os.path.dirname(__file__), "data", plot_filename)
         plt.savefig(plot_path, dpi=150, bbox_inches="tight")
         print(f"\nTraining plot saved to: {plot_path}")
         plt.show()
@@ -375,7 +375,7 @@ def train_neural_network(
         )
     else:
         model_filename = f"neural_network_chess_model_{num_train_samples}.pkl"
-    model_path = os.path.join(os.path.dirname(__file__), model_filename)
+    model_path = os.path.join(os.path.dirname(__file__), "models", model_filename)
     print(f"\nSaving model to {model_path}...")
 
     model_data = {
