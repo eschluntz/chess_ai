@@ -410,7 +410,8 @@ if __name__ == "__main__":
         print("-" * 50)
         for r in results:
             print(
-                f"{r['alpha']:>10.1f} | {r['val_mae']:>10.0f} | {r['avg_magnitude']:>10.1f} | {r['max_magnitude']:>10.1f}"
+                f"{r['alpha']:>10.1f} | {r['val_mae']:>10.0f} | "
+                f"{r['avg_magnitude']:>10.1f} | {r['max_magnitude']:>10.1f}"
             )
 
         # Find best alpha (balance between performance and reasonable magnitudes)
@@ -425,7 +426,8 @@ if __name__ == "__main__":
         if reasonable_results:
             best_reasonable = min(reasonable_results, key=lambda x: x["val_mae"])
             print(
-                f"Best with reasonable magnitudes (<50 cp avg): alpha={best_reasonable['alpha']} (MAE={best_reasonable['val_mae']:.0f} cp)"
+                f"Best with reasonable magnitudes (<50 cp avg): "
+                f"alpha={best_reasonable['alpha']} (MAE={best_reasonable['val_mae']:.0f} cp)"
             )
     else:
         # Train with optimal settings using more data

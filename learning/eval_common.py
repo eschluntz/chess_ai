@@ -107,7 +107,10 @@ def create_combined_scatter_plot(
         ax_full.set_ylabel("Predicted Score (centipawns)", fontsize=12)
 
         # Add improvement in title if not baseline
-        title = f"{func_name} vs Stockfish (Full Range)\nSpearman: {results['spearman_correlation']:.3f}, MAE: {results['mae']:.0f}"
+        title = (
+            f"{func_name} vs Stockfish (Full Range)\n"
+            f"Spearman: {results['spearman_correlation']:.3f}, MAE: {results['mae']:.0f}"
+        )
         if func_name != baseline_name and baseline_name in all_results:
             spearman_improvement = (
                 results["spearman_correlation"]
@@ -162,8 +165,13 @@ def create_combined_scatter_plot(
             from scipy.stats import spearmanr
 
             mae_zoom = mean_absolute_error(true_values_zoom, predictions_zoom)
-            spearman_zoom, _ = spearmanr(predictions_zoom, true_values_zoom)
-            zoom_title = f"{func_name} vs Stockfish (Zoomed: ±1000cp)\nSpearman: {spearman_zoom:.3f}, MAE: {mae_zoom:.0f}"
+            spearman_zoom, _ = spearmanr(
+                predictions_zoom, true_values_zoom
+            )
+            zoom_title = (
+                f"{func_name} vs Stockfish (Zoomed: ±1000cp)\n"
+                f"Spearman: {spearman_zoom:.3f}, MAE: {mae_zoom:.0f}"
+            )
         else:
             zoom_title = f"{func_name} vs Stockfish (Zoomed: ±1000cp)\nNo data in range"
 
@@ -206,7 +214,8 @@ def print_results_summary(
         print(f"  Spearman correlation: {results['spearman_correlation']:.3f}")
         print(f"  Correct winner prediction: {results['correct_sign_percentage']:.1f}%")
         print(
-            f"  Positions evaluated: {results['num_evaluated']:,} (including {results['mate_positions']:,} mate positions)"
+            f"  Positions evaluated: {results['num_evaluated']:,} "
+            f"(including {results['mate_positions']:,} mate positions)"
         )
 
         if not is_baseline and baseline_name in all_results:
@@ -220,7 +229,8 @@ def print_results_summary(
                 - all_results[baseline_name]["correct_sign_percentage"]
             )
             print(
-                f"  vs baseline: MAE {mae_improvement:+.0f}, Spearman {spearman_improvement:+.3f}, Win% {win_improvement:+.1f}"
+                f"  vs baseline: MAE {mae_improvement:+.0f}, "
+                f"Spearman {spearman_improvement:+.3f}, Win% {win_improvement:+.1f}"
             )
 
     # Print table summary

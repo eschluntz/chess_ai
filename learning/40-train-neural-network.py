@@ -4,24 +4,24 @@
 Train a neural network model to evaluate chess positions.
 """
 
-from datasets import load_dataset
+import os
+import pickle
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-import pickle
-import os
+from datasets import load_dataset
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-import matplotlib.pyplot as plt
-from IPython.display import clear_output
 
 # Import helper functions from the eval accuracy script
 from learning.eval_accuracy_helpers import (
     create_board_from_fen,
-    should_skip_position,
     extract_centipawn_score,
+    should_skip_position,
 )
 from learning.feature_extraction import extract_features_piece_square
 
@@ -135,7 +135,8 @@ def train_neural_network(
     print("  Positions 0-9,999: Reserved for evaluation (skipped)")
     print(f"  Positions 10,000-{10000 + num_train_samples - 1:,}: Training data")
     print(
-        f"  Positions {10000 + num_train_samples:,}-{10000 + num_train_samples + num_val_samples - 1:,}: Validation data"
+        f"  Positions {10000 + num_train_samples:,}-"
+        f"{10000 + num_train_samples + num_val_samples - 1:,}: Validation data"
     )
 
     print(f"\nLoading {num_train_samples:,} training positions...")
@@ -207,7 +208,7 @@ def train_neural_network(
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
     # Training loop
-    print(f"\nTraining Neural Network with:")
+    print("\nTraining Neural Network with:")
     print(f"  Hidden layers: {hidden_sizes}")
     print(f"  Batch size: {batch_size}")
     print(f"  Learning rate: {learning_rate}")

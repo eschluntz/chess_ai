@@ -59,7 +59,8 @@ def train_random_forest_model(
     print("  Positions 0-9,999: Reserved for evaluation (skipped)")
     print(f"  Positions 10,000-{10000 + num_train_samples - 1:,}: Training data")
     print(
-        f"  Positions {10000 + num_train_samples:,}-{10000 + num_train_samples + num_val_samples - 1:,}: Validation data"
+        f"  Positions {10000 + num_train_samples:,}-"
+        f"{10000 + num_train_samples + num_val_samples - 1:,}: Validation data"
     )
 
     print(f"\nLoading {num_train_samples:,} training positions...")
@@ -101,7 +102,7 @@ def train_random_forest_model(
     )
 
     # Train the model
-    print(f"\nTraining Random Forest model with params:")
+    print("\nTraining Random Forest model with params:")
     print(f"  n_estimators: {n_estimators}")
     print(f"  max_depth: {max_depth}")
     print(f"  min_samples_split: {min_samples_split}")

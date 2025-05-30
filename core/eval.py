@@ -235,7 +235,8 @@ def linear_piece_square_eval(board, model=None, model_path=None):
                 model_path = default_path
             else:
                 raise ValueError(
-                    "No model provided and no default model found. Train a model using learning/31-train-piece-value-table.py"
+                    "No model provided and no default model found."
+                    "Train a model using learning/31-train-piece-value-table.py"
                 )
         model = load_linear_piece_square_model(model_path)
 

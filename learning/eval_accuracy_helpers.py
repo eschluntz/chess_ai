@@ -3,12 +3,10 @@ Helper functions for evaluation and training scripts.
 Extracted from 2-eval-accuracy.py to avoid code duplication.
 """
 
-import random
 from typing import Any
 
 import chess
 import pandas as pd
-from tqdm import tqdm
 
 
 def create_board_from_fen(fen: str) -> chess.Board:
