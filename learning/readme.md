@@ -70,10 +70,6 @@ piece_value_eval*            119    204    0.272    0.342   43.1      133    8,5
 piece_position_eval          132    206    0.235    0.379   54.4       93    8,523
 ```
 
-### Evaluation TODOs
-[x] measure time
-[x] measure scores when only tested on data < 1k
-
 ## Value Model Training
 
 ### Board Representation
@@ -83,7 +79,7 @@ piece_position_eval          132    206    0.235    0.379   54.4       93    8,5
 optional extra features:
 - 8x8 binary grid of all squares under attack for each side?
 
-### Learning a piece value table
+### model 0: Learning a piece value table
 [x] basics
 [ ] is what's printed out including the base value of the piece?
 [ ] fix formatting of printed out tables (values too big)

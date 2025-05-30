@@ -23,6 +23,7 @@ from learning.eval_accuracy_helpers import (
     extract_centipawn_score,
     should_skip_position,
 )
+from learning.feature_extraction import extract_features_piece_square
 
 
 class LinearPieceSquareModel:
@@ -73,50 +74,9 @@ class LinearPieceSquareModel:
     def extract_features(self, board: chess.Board) -> np.ndarray:
         """
         Extract features for linear piece-square model.
-        For each piece on each square, we create a feature.
+        Uses the standardized feature extraction from feature_extraction.py.
         """
-        # 6 piece types * 64 squares * 2 colors = 768 piece features
-        # + 5 additional features (turn, castling rights)
-        features = np.zeros(773, dtype=np.float32)
-
-        # Extract piece positions
-        piece_types = [
-            chess.PAWN,
-            chess.KNIGHT,
-            chess.BISHOP,
-            chess.ROOK,
-            chess.QUEEN,
-            chess.KING,
-        ]
-
-        for piece_idx, piece_type in enumerate(piece_types):
-            # White pieces
-            for square in board.pieces(piece_type, chess.WHITE):
-                feature_idx = piece_idx * 128 + square * 2
-                features[feature_idx] = 1
-
-            # Black pieces
-            for square in board.pieces(piece_type, chess.BLACK):
-                feature_idx = piece_idx * 128 + square * 2 + 1
-                features[feature_idx] = 1
-
-        # Additional features
-        base_idx = 768
-        features[base_idx] = 1 if board.turn == chess.WHITE else 0
-        features[base_idx + 1] = (
-            1 if board.has_kingside_castling_rights(chess.WHITE) else 0
-        )
-        features[base_idx + 2] = (
-            1 if board.has_queenside_castling_rights(chess.WHITE) else 0
-        )
-        features[base_idx + 3] = (
-            1 if board.has_kingside_castling_rights(chess.BLACK) else 0
-        )
-        features[base_idx + 4] = (
-            1 if board.has_queenside_castling_rights(chess.BLACK) else 0
-        )
-
-        return features
+        return extract_features_piece_square(board)
 
     def fit(self, X, y):
         """Train the linear model."""
