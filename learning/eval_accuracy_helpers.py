@@ -7,6 +7,120 @@ from typing import Any
 
 import chess
 import pandas as pd
+from datasets import load_dataset
+
+
+def get_training_dataset_stream(skip_first_n=10000):
+    """
+    Get the Lichess dataset stream for training, skipping the first N positions.
+    
+    The first 10k positions are reserved for evaluation to avoid data leakage.
+    
+    Args:
+        skip_first_n: Number of positions to skip (default: 10000)
+        
+    Returns:
+        Dataset stream starting after the skipped positions
+    """
+    ds = load_dataset("Lichess/chess-position-evaluations", streaming=True)
+    return ds["train"].skip(skip_first_n)
+
+
+def get_train_df(
+    num_train_samples: int,
+    skip_first_n: int = 10000,
+    include_mates: bool = True,
+    max_mate_distance: int = 15,
+    max_cp: int = 750,
+) -> pd.DataFrame:
+    """
+    Get preprocessed training data as a DataFrame with chess boards and scores.
+    
+    To avoid temporal bias, this function loads 1M positions, shuffles them,
+    and then samples the requested number.
+    
+    Args:
+        num_train_samples: Number of training samples to return
+        skip_first_n: Number of positions to skip (default: 10000)
+        include_mates: Whether to include mate positions (default: True)
+        max_mate_distance: Maximum mate distance to include (default: 15)
+        max_cp: Maximum centipawn value to include (default: 750)
+        
+    Returns:
+        DataFrame with columns: ['fen', 'true_score', 'board']
+    """
+    import time
+    
+    start_time = time.time()
+    
+    # Always load 1M positions to create a large pool
+    pool_size = 1_000_000
+    print(f"Loading {pool_size:,} positions to create shuffled pool...")
+    load_start = time.time()
+    train_stream = get_training_dataset_stream(skip_first_n)
+    train_data = list(train_stream.take(pool_size))
+    load_time = time.time() - load_start
+    print(f"  Loading took {load_time:.2f} seconds")
+
+    # Process training data
+    print("Processing training data...")
+    process_start = time.time()
+    train_df = pd.DataFrame(train_data)
+    train_df = train_df.dropna(subset=["fen"])
+    dataframe_time = time.time() - process_start
+    print(f"  DataFrame creation took {dataframe_time:.2f} seconds")
+
+    # Filter positions
+    filter_start = time.time()
+    train_df["should_skip"] = train_df.apply(
+        lambda row: should_skip_position(
+            row, 
+            include_mates=include_mates,
+            max_mate_distance=max_mate_distance,
+            max_cp=max_cp
+        ), 
+        axis=1
+    )
+    train_df = train_df[~train_df["should_skip"]].copy()
+    filter_time = time.time() - filter_start
+    print(f"  Filtering took {filter_time:.2f} seconds")
+
+    # Extract scores and create boards
+    score_start = time.time()
+    train_df["true_score"] = train_df.apply(extract_centipawn_score, axis=1)
+    score_time = time.time() - score_start
+    print(f"  Score extraction took {score_time:.2f} seconds")
+    
+    board_start = time.time()
+    train_df["board"] = train_df["fen"].apply(create_board_from_fen)
+    board_time = time.time() - board_start
+    print(f"  Board creation took {board_time:.2f} seconds")
+
+    print(f"Filtered to {len(train_df)} valid positions")
+    
+    # Shuffle the dataframe to remove temporal bias
+    print("Shuffling data to remove temporal bias...")
+    shuffle_start = time.time()
+    train_df = train_df.sample(frac=1.0, random_state=42).reset_index(drop=True)
+    shuffle_time = time.time() - shuffle_start
+    print(f"  Shuffling took {shuffle_time:.2f} seconds")
+    
+    # Sample the requested number of positions
+    sample_start = time.time()
+    if num_train_samples > len(train_df):
+        print(f"Warning: Requested {num_train_samples:,} samples but only {len(train_df):,} available")
+        sampled_df = train_df
+    else:
+        sampled_df = train_df.head(num_train_samples)
+        print(f"Sampled {num_train_samples:,} positions from shuffled pool")
+    sample_time = time.time() - sample_start
+    print(f"  Sampling took {sample_time:.2f} seconds")
+    
+    total_time = time.time() - start_time
+    print(f"Total get_train_df time: {total_time:.2f} seconds")
+    
+    # Return only the columns needed for training
+    return sampled_df[["fen", "true_score", "board"]]
 
 
 def create_board_from_fen(fen: str) -> chess.Board:
