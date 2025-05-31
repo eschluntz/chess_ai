@@ -30,7 +30,7 @@ def get_raw_shuffled_data() -> pd.DataFrame:
         return _raw_shuffled_cache
 
     # Check if we have a saved parquet file
-    cache_file = "learning/cache/shuffled_1m_dataset.parquet"
+    cache_file = "learning/cache/shuffled_10m_dataset.parquet"
 
     if os.path.exists(cache_file):
         print(f"Loading shuffled dataset from cache file: {cache_file}")
@@ -43,8 +43,8 @@ def get_raw_shuffled_data() -> pd.DataFrame:
     # Need to create the cached file
     print("No cached file found. Creating shuffled dataset from streaming data...")
 
-    # Always load 1M positions from the beginning using streaming
-    pool_size = 1_000_000
+    # Always load 10M positions from the beginning using streaming
+    pool_size = 10_000_000
 
     print(f"Streaming first {pool_size:,} positions...")
     ds = load_dataset("Lichess/chess-position-evaluations", streaming=True)

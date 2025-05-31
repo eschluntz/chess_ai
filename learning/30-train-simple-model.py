@@ -1,48 +1,54 @@
 #!/usr/bin/env python
 
 """
-Train a simple random forest model to evaluate chess positions.
+Train a random forest model to evaluate chess positions using piece-square features.
+
+Usage:
+    30-train-simple-model.py
+    30-train-simple-model.py single
+    30-train-simple-model.py --help
+
+Commands:
+    (no command)    Run parameter sweep
+    single          Train single model
+
+Options:
+    -h --help       Show this screen
 """
 
+import csv
 import os
 import pickle
+from datetime import datetime
 
+import matplotlib
+
+matplotlib.use("TkAgg")  # Use TkAgg backend for better display support
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from datasets import load_dataset
+from docopt import docopt
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
 
-# Import helper functions from the eval accuracy script
-from learning.eval_accuracy_helpers import (
-    create_board_from_fen,
-    extract_centipawn_score,
-    should_skip_position,
-)
-from learning.feature_extraction import (
-    extract_features_basic,
-    extract_features_piece_square,
-)
+# Import helper functions
+from learning.eval_accuracy_helpers import get_eval_df, get_train_df
+from learning.feature_extraction import extract_features_piece_square
 
 
 def train_random_forest_model(
     num_train_samples: int = 50000,
-    num_val_samples: int = 10000,
-    feature_type: str = "basic",
-    model_suffix: str = "",
+    include_mates: bool = True,
     n_estimators: int = 100,
     max_depth: int = 10,
     min_samples_split: int = 20,
     min_samples_leaf: int = 10,
 ):
     """
-    Train a random forest model on chess positions.
+    Train a random forest model on chess positions using piece-square features.
 
     Args:
         num_train_samples: Number of training samples to use
-        num_val_samples: Number of validation samples to use
-        feature_type: 'basic' or 'piece_square' feature extraction
-        model_suffix: Additional suffix for model filename
+        include_mates: Whether to include mate positions
         n_estimators: Number of trees in the forest
         max_depth: Maximum depth of the trees
         min_samples_split: Minimum samples required to split a node
@@ -51,55 +57,16 @@ def train_random_forest_model(
     Returns:
         tuple: (model, metrics_dict) where metrics_dict contains train and validation errors
     """
-    print("Loading Lichess chess position evaluations dataset (streaming)...")
-    ds = load_dataset("Lichess/chess-position-evaluations", streaming=True)
+    # Get preprocessed training data
+    train_df = get_train_df(num_train_samples, include_mates=include_mates)
 
-    # Skip first 10k (reserved for evaluation), then load training data
-    print("\nData split:")
-    print("  Positions 0-9,999: Reserved for evaluation (skipped)")
-    print(f"  Positions 10,000-{10000 + num_train_samples - 1:,}: Training data")
-    print(
-        f"  Positions {10000 + num_train_samples:,}-"
-        f"{10000 + num_train_samples + num_val_samples - 1:,}: Validation data"
+    # Extract features using piece-square extraction
+    print("Extracting piece-square features...")
+    X_train = np.array(
+        [extract_features_piece_square(board) for board in train_df["board"]]
     )
-
-    print(f"\nLoading {num_train_samples:,} training positions...")
-    train_stream = ds["train"].skip(10000)
-    train_data = list(train_stream.take(num_train_samples))
-
-    # Process training data
-    print("Processing training data...")
-    train_df = pd.DataFrame(train_data)
-    train_df = train_df.dropna(subset=["fen"])
-
-    # Filter positions
-    train_df["should_skip"] = train_df.apply(
-        lambda row: should_skip_position(row), axis=1
-    )
-    train_df = train_df[~train_df["should_skip"]].copy()
-
-    # Extract scores and create boards
-    train_df["true_score"] = train_df.apply(extract_centipawn_score, axis=1)
-    train_df["board"] = train_df["fen"].apply(create_board_from_fen)
-
-    # Choose feature extractor
-    if feature_type == "piece_square":
-        extract_features = extract_features_piece_square
-        print("Using piece-square feature extraction (768+ features)")
-    else:
-        extract_features = extract_features_basic
-        print("Using basic feature extraction (20 features)")
-
-    print(f"Extracting features from {len(train_df)} training positions...")
-    # Extract features
-    X_train = np.array([extract_features(board) for board in train_df["board"]])
     y_train = train_df["true_score"].values
     print(f"Feature shape: {X_train.shape}")
-
-    # Split training data for validation
-    X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
-        X_train, y_train, test_size=0.2, random_state=42
-    )
 
     # Train the model
     print("\nTraining Random Forest model with params:")
@@ -116,17 +83,24 @@ def train_random_forest_model(
         random_state=42,
         n_jobs=-1,
     )
-    model.fit(X_train_split, y_train_split)
+    model.fit(X_train, y_train)
 
-    # Evaluate on training set (to check for overfitting)
-    train_predictions = model.predict(X_train_split)
-    train_mae = np.mean(np.abs(train_predictions - y_train_split))
-    train_rmse = np.sqrt(np.mean((train_predictions - y_train_split) ** 2))
+    # Get validation data using get_eval_df
+    print("Getting validation data...")
+    val_df = get_eval_df(include_mates=include_mates)
+    X_val = np.array(
+        [extract_features_piece_square(board) for board in val_df["board"]]
+    )
+    y_val = val_df["true_score"].values
 
-    # Evaluate on validation set
-    val_predictions = model.predict(X_val_split)
-    val_mae = np.mean(np.abs(val_predictions - y_val_split))
-    val_rmse = np.sqrt(np.mean((val_predictions - y_val_split) ** 2))
+    # Evaluate
+    train_predictions = model.predict(X_train)
+    train_mae = np.mean(np.abs(train_predictions - y_train))
+    train_rmse = np.sqrt(np.mean((train_predictions - y_train) ** 2))
+
+    val_predictions = model.predict(X_val)
+    val_mae = np.mean(np.abs(val_predictions - y_val))
+    val_rmse = np.sqrt(np.mean((val_predictions - y_val) ** 2))
 
     print("\nTraining set performance:")
     print(f"  MAE: {train_mae:.2f} centipawns")
@@ -134,102 +108,127 @@ def train_random_forest_model(
     print("\nValidation set performance:")
     print(f"  MAE: {val_mae:.2f} centipawns")
     print(f"  RMSE: {val_rmse:.2f} centipawns")
-    print("\nOverfitting check:")
-    print(f"  MAE difference (val - train): {val_mae - train_mae:.2f} centipawns")
-    print(f"  RMSE difference (val - train): {val_rmse - train_rmse:.2f} centipawns")
 
-    # Load validation data (from training set, after evaluation and training data)
-    print(f"\nLoading {num_val_samples} validation positions...")
-    val_stream = ds["train"].skip(10000 + num_train_samples)
-    val_data = list(val_stream.take(num_val_samples))
-
-    # Process validation data
-    print("Processing validation data...")
-    val_df = pd.DataFrame(val_data)
-    val_df = val_df.dropna(subset=["fen"])
-
-    val_df["should_skip"] = val_df.apply(lambda row: should_skip_position(row), axis=1)
-    val_df = val_df[~val_df["should_skip"]].copy()
-
-    val_df["true_score"] = val_df.apply(extract_centipawn_score, axis=1)
-    val_df["board"] = val_df["fen"].apply(create_board_from_fen)
-
-    print(f"Extracting features from {len(val_df)} validation positions...")
-    X_val = np.array([extract_features(board) for board in val_df["board"]])
-    y_val = val_df["true_score"].values
-
-    # Evaluate on independent validation set
-    final_val_predictions = model.predict(X_val)
-    final_val_mae = np.mean(np.abs(final_val_predictions - y_val))
-    final_val_rmse = np.sqrt(np.mean((final_val_predictions - y_val) ** 2))
-
-    # Also evaluate on full training set for comparison
-    full_train_predictions = model.predict(X_train)
-    full_train_mae = np.mean(np.abs(full_train_predictions - y_train))
-    full_train_rmse = np.sqrt(np.mean((full_train_predictions - y_train) ** 2))
-
-    print("\nFinal evaluation on full datasets:")
-    print(f"  Full training set MAE: {full_train_mae:.2f} centipawns")
-    print(f"  Full training set RMSE: {full_train_rmse:.2f} centipawns")
-    print(f"  Independent validation MAE: {final_val_mae:.2f} centipawns")
-    print(f"  Independent validation RMSE: {final_val_rmse:.2f} centipawns")
-    print(
-        f"  Generalization gap (MAE): {final_val_mae - full_train_mae:.2f} centipawns"
-    )
-
-    # Save the model with training samples and feature type in filename
-    if model_suffix:
-        model_filename = f"random_forest_chess_model_{num_train_samples}_{feature_type}_{model_suffix}.pkl"
-    else:
-        model_filename = (
-            f"random_forest_chess_model_{num_train_samples}_{feature_type}.pkl"
-        )
-    model_path = os.path.join(os.path.dirname(__file__), "models", model_filename)
+    # Save the model
+    mates_suffix = "with_mates" if include_mates else "no_mates"
+    model_filename = f"random_forest_chess_model_{num_train_samples}_estimators{n_estimators}_depth{max_depth}_{mates_suffix}_v2.pkl"
+    model_path = os.path.join(os.path.dirname(__file__), "saved_models", model_filename)
     print(f"\nSaving model to {model_path}...")
+    os.makedirs(os.path.dirname(model_path), exist_ok=True)
     with open(model_path, "wb") as f:
-        pickle.dump({"model": model, "feature_type": feature_type}, f)
+        pickle.dump({"model": model, "feature_type": "piece_square"}, f)
 
     print("\nTraining complete!")
     print(f"Model saved to: {model_path}")
 
     # Return model and metrics
-    metrics = {
-        "num_train_samples": num_train_samples,
-        "feature_type": feature_type,
-        "n_estimators": n_estimators,
-        "max_depth": max_depth,
-        "min_samples_split": min_samples_split,
-        "min_samples_leaf": min_samples_leaf,
-        "train_mae": full_train_mae,
-        "val_mae": final_val_mae,
+    return model, {
+        "train_mae": train_mae,
+        "train_rmse": train_rmse,
+        "val_mae": val_mae,
+        "val_rmse": val_rmse,
     }
 
-    return model, metrics
+
+# Global figure for persistent plotting
+_sweep_fig = None
+_sweep_ax = None
 
 
-if __name__ == "__main__":
-    # Fixed training size
-    training_size = 100_000
-    feature_type = "piece_square"
+def create_sweep_visualizations(results, timestamp):
+    """Create line plots for the parameter sweep results."""
+    global _sweep_fig, _sweep_ax
 
-    # Linear sweep - all parameters scale together
+    if not results:
+        return
+
+    df = pd.DataFrame(results)
+
+    # Create figure only once
+    if _sweep_fig is None:
+        plt.ion()  # Enable interactive mode
+        plt.style.use("default")
+        _sweep_fig, _sweep_ax = plt.subplots(1, 1, figsize=(12, 8))
+        _sweep_fig.suptitle("Random Forest Parameter Sweep", fontsize=16)
+        plt.show(block=False)
+
+    # Clear the axis for redrawing
+    _sweep_ax.clear()
+
+    # Combined train/val MAE plot
+    colors = plt.cm.tab10(np.linspace(0, 1, len(df["name"].unique())))
+    for i, name in enumerate(df["name"].unique()):
+        name_data = df[df["name"] == name]
+        color = colors[i]
+        _sweep_ax.plot(
+            name_data["num_samples"],
+            name_data["train_mae"],
+            marker="o",
+            linestyle="-",
+            color=color,
+            label=f"Train {name}",
+        )
+        _sweep_ax.plot(
+            name_data["num_samples"],
+            name_data["val_mae"],
+            marker="s",
+            linestyle="--",
+            color=color,
+            label=f"Val {name}",
+        )
+    _sweep_ax.set_xlabel("Number of Samples")
+    _sweep_ax.set_ylabel("MAE")
+    _sweep_ax.set_xscale("log")
+    _sweep_ax.legend()
+    _sweep_ax.grid(True, alpha=0.3)
+    _sweep_ax.set_title("Train vs Validation MAE")
+
+    # Update the display
+    _sweep_fig.canvas.draw()
+    _sweep_fig.canvas.flush_events()
+
+    # Save the plot
+    plot_file = f"learning/results/random_forest_sweep_{timestamp}.png"
+    _sweep_fig.savefig(plot_file, dpi=300, bbox_inches="tight")
+    print(f"Plots saved to {plot_file}")
+
+
+def run_parameter_sweep():
+    """Run 2D parameter sweep over training sizes and random forest hyperparameters."""
+    include_mates = False  # Set this to control whether to include mate positions
+
+    # Training sizes to test (same range as linear model)
+    training_sizes = [
+        10_000,
+        33_000,
+        100_000,
+        330_000,
+        1_000_000,
+        3_300_000,
+        10_000_000,
+    ]
+
+    # Parameter combinations to test
     experiments = [
-        # Small model (fast, less accurate)
-        {
-            "n_estimators": 10,
-            "max_depth": 5,
-            "min_samples_split": 50,
-            "min_samples_leaf": 25,
-        },
-        # Medium-small model
-        {
-            "n_estimators": 30,
-            "max_depth": 10,
-            "min_samples_split": 20,
-            "min_samples_leaf": 10,
-        },
+        # # Small model (fast, less accurate)
+        # {
+        #     "name": "small",
+        #     "n_estimators": 10,
+        #     "max_depth": 5,
+        #     "min_samples_split": 50,
+        #     "min_samples_leaf": 25,
+        # },
+        # # Medium-small model
+        # {
+        #     "name": "medium_small",
+        #     "n_estimators": 30,
+        #     "max_depth": 10,
+        #     "min_samples_split": 20,
+        #     "min_samples_leaf": 10,
+        # },
         # Medium model (baseline)
         {
+            "name": "medium",
             "n_estimators": 100,
             "max_depth": 15,
             "min_samples_split": 10,
@@ -237,40 +236,173 @@ if __name__ == "__main__":
         },
         # Large model
         {
+            "name": "large",
             "n_estimators": 200,
             "max_depth": 20,
             "min_samples_split": 5,
             "min_samples_leaf": 2,
         },
-        # Very large model (slow, potentially overfit)
+        # Very large model
         {
+            "name": "very_large",
             "n_estimators": 500,
+            "max_depth": 25,
+            "min_samples_split": 2,
+            "min_samples_leaf": 1,
+        },
+        # Extra large model (maximum complexity)
+        {
+            "name": "extra_large",
+            "n_estimators": 1000,
             "max_depth": None,
             "min_samples_split": 2,
             "min_samples_leaf": 1,
         },
     ]
 
-    # List to store results for CSV
+    # Initialize CSV file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    mates_suffix = "with_mates" if include_mates else "no_mates"
+    csv_file = f"learning/results/random_forest_sweep_{mates_suffix}_v2.csv"
+
+    # Create results directory if it doesn't exist
+    os.makedirs("learning/results", exist_ok=True)
+
+    fieldnames = [
+        "name",
+        "n_estimators",
+        "max_depth",
+        "min_samples_split",
+        "min_samples_leaf",
+        "num_samples",
+        "train_mae",
+        "train_rmse",
+        "val_mae",
+        "val_rmse",
+        "timestamp",
+    ]
+
+    # Load existing results if CSV exists
     results = []
+    completed_combinations = set()
 
-    csv_path = os.path.join(os.path.dirname(__file__), "data", "rf_parameter_sweep_results.csv")
+    if os.path.exists(csv_file):
+        print(f"Loading existing results from {csv_file}")
+        try:
+            with open(csv_file, "r", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    # Convert string values back to appropriate types
+                    result = {
+                        "name": row["name"],
+                        "n_estimators": int(row["n_estimators"]),
+                        "max_depth": int(row["max_depth"])
+                        if row["max_depth"] != "None"
+                        else None,
+                        "min_samples_split": int(row["min_samples_split"]),
+                        "min_samples_leaf": int(row["min_samples_leaf"]),
+                        "num_samples": int(row["num_samples"]),
+                        "train_mae": float(row["train_mae"]),
+                        "train_rmse": float(row["train_rmse"]),
+                        "val_mae": float(row["val_mae"]),
+                        "val_rmse": float(row["val_rmse"]),
+                        "timestamp": row["timestamp"],
+                    }
+                    results.append(result)
+                    # Create key for completed combinations
+                    key = (result["name"], result["num_samples"])
+                    completed_combinations.add(key)
+            print(f"Loaded {len(results)} existing results")
+        except Exception as e:
+            print(f"Error loading existing CSV: {e}")
+            results = []
+            completed_combinations = set()
+    else:
+        # Create new CSV file with header
+        with open(csv_file, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
 
-    for i, params in enumerate(experiments, 1):
-        print("\n" + "=" * 80)
-        print(f"Experiment {i}/{len(experiments)}")
-        print(f"Training {feature_type} model with {training_size:,} samples")
-        print(f"Parameters: {params}")
-        print("=" * 80)
+    total_experiments = len(training_sizes) * len(experiments)
+    experiment_count = 0
 
+    for training_size in training_sizes:
+        for params in experiments:
+            experiment_count += 1
+
+            # Check if this combination has already been completed
+            key = (params["name"], training_size)
+            if key in completed_combinations:
+                print(
+                    f"Skipping experiment {experiment_count}/{total_experiments} (already completed): {params['name']} model with {training_size:,} samples"
+                )
+                continue
+
+            print("\n" + "=" * 80)
+            print(f"Experiment {experiment_count}/{total_experiments}")
+            print(
+                f"Training '{params['name']}' random forest model with {training_size:,} samples"
+            )
+            print(f"Parameters: {params}")
+            print("=" * 80)
+
+            try:
+                # Extract parameters without the name field
+                model_params = {k: v for k, v in params.items() if k != "name"}
+                _, metrics = train_random_forest_model(
+                    num_train_samples=training_size,
+                    include_mates=include_mates,
+                    **model_params,
+                )
+
+                result = {
+                    "name": params["name"],
+                    "n_estimators": params["n_estimators"],
+                    "max_depth": params["max_depth"],
+                    "min_samples_split": params["min_samples_split"],
+                    "min_samples_leaf": params["min_samples_leaf"],
+                    "num_samples": training_size,
+                    "train_mae": metrics["train_mae"],
+                    "train_rmse": metrics["train_rmse"],
+                    "val_mae": metrics["val_mae"],
+                    "val_rmse": metrics["val_rmse"],
+                    "timestamp": datetime.now().isoformat(),
+                }
+
+                results.append(result)
+                completed_combinations.add(key)
+
+                # Append to CSV file immediately
+                with open(csv_file, "a", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writerow(result)
+
+                print(f"Results saved to {csv_file}")
+
+                # Create updated visualizations after each training
+                if len(results) > 0:
+                    create_sweep_visualizations(results, timestamp)
+
+            except Exception as e:
+                print(f"Error training with params {params}, size {training_size}: {e}")
+                continue
+
+    # Final summary
+    print(f"\nCompleted parameter sweep with {len(results)} total results")
+    return results
+
+
+if __name__ == "__main__":
+    arguments = docopt(__doc__)
+
+    if arguments["single"]:
+        # Train single model
+        print("Training single random forest model...")
         model, metrics = train_random_forest_model(
-            num_train_samples=training_size, feature_type=feature_type, **params
+            num_train_samples=100_000, include_mates=False
         )
-        results.append(metrics)
-
-        # Save results to CSV after each model
-        results_df = pd.DataFrame(results)
-        results_df.to_csv(csv_path, index=False)
-        print(f"\nResults saved to: {csv_path}")
-
-    print(f"\n\nAll training complete! Final results saved to: {csv_path}")
+    else:
+        # Run parameter sweep
+        print("Running parameter sweep...")
+        results = run_parameter_sweep()
+        print(f"\nCompleted sweep with {len(results)} successful runs")

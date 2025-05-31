@@ -62,21 +62,31 @@ What am I actually optimizing for?
 ![evals](learning/assets/eval_comparisons.png)
 
 ```
-Model                        MAE   RMSE Spearman  Pearson   Win% k runs/s        N
-------------------------------------------------------------------------------------------
-piece_value_eval*           1494   4955    0.357    0.575   49.0       96    9,537
-linear_10e6_a10_no_mates    1494   5017    0.539    0.541   69.5       19    9,537
-linear_10e6_a10_yes_mates   1570   3451    0.370    0.722   59.6       19    9,537
-piece_position_eval         1506   4952    0.344    0.561   60.1       79    9,537
-
- (|Score| < 1000cp Subset)
 ==================================================
-Model                        MAE   RMSE Spearman  Pearson   Win% k runs/s        N
+SUMMARY TABLE (All Positions)
+==================================================
+Model                        MAE   RMSE Spearman  Pearson   Win%      k/s        N
 ------------------------------------------------------------------------------------------
-piece_value_eval*            115    198    0.254    0.290   46.2       96    8,784
-linear_10e6_a10_no_mates      96    155    0.472    0.516   67.8       19    8,784
-linear_10e6_a10_yes_mates    975   1790    0.241    0.308   56.8       19    8,784
-piece_position_eval          130    203    0.249    0.300   58.1       79    8,784
+piece_value_eval*           1506   4941    0.347    0.533   51.7       60    9,577
+linear_1000000_alpha10_no   1510   4998    0.488    0.532   67.2       21    9,577
+linear_1000000_alpha10_with 1946   3968    0.350    0.619   59.4       21    9,577
+piece_position_eval         1517   4938    0.336    0.522   60.2       84    9,577
+rf_1000000_estimators500    1517   5059    0.554    0.233   69.6        0    9,577
+rf_330000_estimators1000    1502   5053    0.649    0.201   75.5        0    9,577
+
+* = baseline model
+
+==================================================
+SUMMARY TABLE (|Score| < 1000cp Subset)
+==================================================
+Model                        MAE   RMSE Spearman  Pearson   Win%      k/s        N
+------------------------------------------------------------------------------------------
+piece_value_eval*            132    217    0.257    0.295   49.3       60    8,820
+linear_1000000_alpha10_no    118    182    0.415    0.442   65.4       21    8,820
+linear_1000000_alpha10_with 1223   2091    0.240    0.282   57.0       21    8,820
+piece_position_eval          145    222    0.250    0.304   58.3       84    8,820
+rf_1000000_estimators500     108    178    0.524    0.572   68.1        0    8,820
+rf_330000_estimators1000      93    159    0.648    0.646   74.3        0    8,820
 ```
 
 ## Value Model Training

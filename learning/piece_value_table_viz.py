@@ -72,17 +72,13 @@ def get_piece_square_tables(model):
 
             # Get coefficient for white piece on this square
             white_coef_idx = piece_idx * 128 + square * 2
-            white_value = (
-                PIECE_VALUES[piece_type] + coefficients[white_coef_idx]
-            )
+            white_value = PIECE_VALUES[piece_type] + coefficients[white_coef_idx]
             white_table[rank, file] = white_value
 
             # Get coefficient for black piece on this square
             black_coef_idx = piece_idx * 128 + square * 2 + 1
             # Note: Black coefficients are negative in the model
-            black_value = (
-                -PIECE_VALUES[piece_type] + coefficients[black_coef_idx]
-            )
+            black_value = -PIECE_VALUES[piece_type] + coefficients[black_coef_idx]
             black_table[rank, file] = black_value
 
         piece_square_tables[piece_names[piece_type]] = {

@@ -45,7 +45,7 @@ def evaluate_all_functions(
         evaluation_time = end_time - start_time
         runs_per_second = len(processed_df) / evaluation_time
         runs_per_second_k = round(runs_per_second / 1000)
-        print(f"  Completed in {evaluation_time:.2f}s ({runs_per_second_k}k runs/s)")
+        print(f"  Completed in {evaluation_time:.2f}s ({runs_per_second_k}k/s)")
 
         # Calculate metrics
         predictions = processed_df["prediction"].values
@@ -264,7 +264,7 @@ def print_results_summary(
         )
         runs_per_second_k = round(results["runs_per_second"] / 1000)
         print(
-            f"  Evaluation time: {results['evaluation_time']:.2f}s ({runs_per_second_k}k runs/s)"
+            f"  Evaluation time: {results['evaluation_time']:.2f}s ({runs_per_second_k}k/s)"
         )
 
         # Print subset results for abs(true_score) < 1000
@@ -316,7 +316,7 @@ def print_results_summary(
 
     # Table header
     print(
-        f"{'Model':<25} {'MAE':>6} {'RMSE':>6} {'Spearman':>8} {'Pearson':>8} {'Win%':>6} {'k runs/s':>8} {'N':>8}"
+        f"{'Model':<25} {'MAE':>6} {'RMSE':>6} {'Spearman':>8} {'Pearson':>8} {'Win%':>6} {'k/s':>8} {'N':>8}"
     )
     print("-" * 90)
 
@@ -350,7 +350,7 @@ def print_results_summary(
 
     # Subset table header
     print(
-        f"{'Model':<25} {'MAE':>6} {'RMSE':>6} {'Spearman':>8} {'Pearson':>8} {'Win%':>6} {'k runs/s':>8} {'N':>8}"
+        f"{'Model':<25} {'MAE':>6} {'RMSE':>6} {'Spearman':>8} {'Pearson':>8} {'Win%':>6} {'k/s':>8} {'N':>8}"
     )
     print("-" * 90)
 
