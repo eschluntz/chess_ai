@@ -3,11 +3,31 @@
 """
 Train a linear model to learn piece-square tables from chess positions.
 The model learns deltas from standard piece values for each square.
+
+Usage:
+    31-train-piece-value-table.py
+    31-train-piece-value-table.py single
+    31-train-piece-value-table.py show [<csv_file>]
+    31-train-piece-value-table.py tables <model_file>
+    31-train-piece-value-table.py --help
+
+Commands:
+    (no command)    Run parameter sweep
+    single          Train single model
+    show            Show existing results from CSV file
+    tables          Print piece value tables from saved model
+
+Options:
+    -h --help       Show this screen
+    <csv_file>      Path to CSV file for visualization
+    <model_file>    Path to saved model file
 """
 
 import csv
 import pickle
 from datetime import datetime
+
+from docopt import docopt
 
 import matplotlib
 
@@ -16,12 +36,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import Ridge
-from sklearn.model_selection import train_test_split
 
 from core.eval import PIECE_VALUES
 
 # Import helper functions
-from learning.eval_accuracy_helpers import get_train_df
+from learning.eval_accuracy_helpers import get_eval_df, get_train_df
 from learning.feature_extraction import extract_features_piece_square
 from learning.piece_value_table_viz import (
     build_feature_names,
@@ -72,23 +91,26 @@ def train_linear_piece_square_model(
 
     print(f"Feature shape: {X_train.shape}")
 
-    # Split for validation
-    X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
-        X_train, y_train, test_size=0.1, random_state=42
-    )
-
     # Train the model
     print("\nTraining linear model...")
-    model.fit(X_train_split, y_train_split)
+    model.fit(X_train, y_train)
+
+    # Get validation data using get_eval_df
+    print("Getting validation data...")
+    val_df = get_eval_df(include_mates=include_mates)
+    X_val = np.array(
+        [extract_features_piece_square(board) for board in val_df["board"]]
+    )
+    y_val = val_df["true_score"].values
 
     # Evaluate
-    train_predictions = model.predict(X_train_split)
-    train_mae = np.mean(np.abs(train_predictions - y_train_split))
-    train_rmse = np.sqrt(np.mean((train_predictions - y_train_split) ** 2))
+    train_predictions = model.predict(X_train)
+    train_mae = np.mean(np.abs(train_predictions - y_train))
+    train_rmse = np.sqrt(np.mean((train_predictions - y_train) ** 2))
 
-    val_predictions = model.predict(X_val_split)
-    val_mae = np.mean(np.abs(val_predictions - y_val_split))
-    val_rmse = np.sqrt(np.mean((val_predictions - y_val_split) ** 2))
+    val_predictions = model.predict(X_val)
+    val_mae = np.mean(np.abs(val_predictions - y_val))
+    val_rmse = np.sqrt(np.mean((val_predictions - y_val) ** 2))
 
     print("\nTraining set performance:")
     print(f"  MAE: {train_mae:.2f} centipawns")
@@ -99,7 +121,7 @@ def train_linear_piece_square_model(
 
     # Save the model
     mates_suffix = "with_mates" if include_mates else "no_mates"
-    model_path = f"learning/models/linear_piece_square_model_{num_train_samples}_alpha{alpha}_{mates_suffix}_shuff.pkl"
+    model_path = f"learning/models/linear_piece_square_model_{num_train_samples}_alpha{alpha}_{mates_suffix}_v2.pkl"
     print(f"\nSaving model to {model_path}...")
     with open(model_path, "wb") as f:
         pickle.dump(model, f)
@@ -114,12 +136,14 @@ def train_linear_piece_square_model(
 
 def run_parameter_sweep():
     """Run 2D parameter sweep over alphas and sample sizes."""
-    alphas = [10, 33, 100, 330]
+    alphas = [3, 10, 33, 100]
     sample_sizes = [10_000, 33_000, 100_000, 330_000, 1_000_000]
+    include_mates = True  # Set this to control whether to include mate positions
 
     # Initialize CSV file
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_file = "learning/results/linear_piece_square_sweep_no_mate_shuff.csv"
+    mates_suffix = "with_mates" if include_mates else "no_mates"
+    csv_file = f"learning/results/linear_piece_square_sweep_{mates_suffix}_v2.csv"
 
     # Create results directory if it doesn't exist
     import os
@@ -186,7 +210,9 @@ def run_parameter_sweep():
 
             try:
                 _, metrics = train_linear_piece_square_model(
-                    num_train_samples=num_samples, alpha=alpha, include_mates=False
+                    num_train_samples=num_samples,
+                    alpha=alpha,
+                    include_mates=include_mates,
                 )
 
                 result = {
@@ -280,14 +306,17 @@ def create_sweep_visualizations(results, timestamp):
     _sweep_fig.canvas.flush_events()
 
     # Save the plot
-    plot_file = f"learning/results/linear_piece_square_sweep_{timestamp}.png"
+    plot_file = f"learning/results/linear_piece_square_sweep_{timestamp}_v2.png"
     _sweep_fig.savefig(plot_file, dpi=300, bbox_inches="tight")
     print(f"Plots saved to {plot_file}")
 
 
-def show_existing_results():
+def show_existing_results(csv_file=None):
     """Load and display results from existing CSV file."""
-    csv_file = "learning/results/linear_piece_square_sweep_no_mate.csv"
+    if csv_file is None:
+        include_mates = False  # Should match the setting used in run_parameter_sweep
+        mates_suffix = "with_mates" if include_mates else "no_mates"
+        csv_file = f"learning/results/linear_piece_square_sweep_{mates_suffix}_v2.csv"
 
     if not os.path.exists(csv_file):
         print(f"No existing results found at {csv_file}")
@@ -324,28 +353,34 @@ def show_existing_results():
         print(f"Error loading CSV: {e}")
 
 
+def load_and_print_tables(model_file):
+    """Load a saved model and print its piece value tables."""
+    print(f"Loading model from {model_file}...")
+    with open(model_file, "rb") as f:
+        model = pickle.load(f)
+    print_all_piece_square_tables(model)
+
+
 if __name__ == "__main__":
     import os
-    import sys
 
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "single":
-            # Train single model with visualization
-            print("Training single linear piece-square model...")
-            model, metrics = train_linear_piece_square_model(
-                num_train_samples=100_000, alpha=100.0
-            )
-            print_all_piece_square_tables(model)
-        elif sys.argv[1] == "show":
-            # Just show existing results
-            show_existing_results()
-        else:
-            print("Usage:")
-            print("  python 31-train-piece-value-table.py        # Run parameter sweep")
-            print("  python 31-train-piece-value-table.py single # Train single model")
-            print(
-                "  python 31-train-piece-value-table.py show   # Show existing results"
-            )
+    arguments = docopt(__doc__)
+
+    if arguments["single"]:
+        # Train single model with visualization
+        print("Training single linear piece-square model...")
+        model, metrics = train_linear_piece_square_model(
+            num_train_samples=100_000, alpha=100.0
+        )
+        print_all_piece_square_tables(model)
+    elif arguments["show"]:
+        # Show existing results
+        csv_path = arguments["<csv_file>"]
+        show_existing_results(csv_path)
+    elif arguments["tables"]:
+        # Print piece value tables from saved model
+        model_file = arguments["<model_file>"]
+        load_and_print_tables(model_file)
     else:
         # Run parameter sweep
         print("Running 2D parameter sweep...")

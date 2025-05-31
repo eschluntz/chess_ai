@@ -141,24 +141,24 @@ def visualize_piece_square_table(model, piece_name, color="white", show_deltas=T
         table = tables[piece_name][color]
         print(f"\n{piece_name} Total Position Values ({color}):")
 
-    print("    a    b    c    d    e    f    g    h")
-    print("  +----+----+----+----+----+----+----+----+")
+    print("    a      b      c      d      e      f      g      h")
+    print("  +------+------+------+------+------+------+------+------+")
 
     for rank in range(7, -1, -1):  # Start from rank 8 down to rank 1
         print(f"{rank + 1} |", end="")
         for file in range(8):
             value = table[rank, file]
-            # Format with sign for deltas, limit to 3 digits
+            # Format with sign for deltas, handle up to 6 characters
             if show_deltas and value >= 0:
-                print(f" {value:+3.0f}|", end="")
+                print(f" {value:+5.0f}|", end="")
             else:
-                print(f" {value:3.0f}|", end="")
+                print(f" {value:5.0f}|", end="")
         print(f" {rank + 1}")
         if rank > 0:
-            print("  +----+----+----+----+----+----+----+----+")
+            print("  +------+------+------+------+------+------+------+------+")
 
-    print("  +----+----+----+----+----+----+----+----+")
-    print("    a    b    c    d    e    f    g    h")
+    print("  +------+------+------+------+------+------+------+------+")
+    print("    a      b      c      d      e      f      g      h")
 
     # Print statistics about the values
     if show_deltas:

@@ -36,6 +36,15 @@ from learning.feature_extraction import (
     extract_features_piece_square,
 )
 
+# Import LinearPieceSquareModel class for pickle loading
+spec_31 = importlib.util.spec_from_file_location(
+    "train_piece_value_table",
+    os.path.join(os.path.dirname(__file__), "31-train-piece-value-table.py")
+)
+train_piece_value_table = importlib.util.module_from_spec(spec_31)
+spec_31.loader.exec_module(train_piece_value_table)
+LinearPieceSquareModel = train_piece_value_table.LinearPieceSquareModel
+
 spec = importlib.util.spec_from_file_location(
     "train_neural_network",
     os.path.join(os.path.dirname(__file__), "40-train-neural-network.py"),
@@ -118,37 +127,12 @@ def load_linear_piece_square_eval(
     model_path: str,
 ) -> Callable[[chess.Board], tuple[int, bool]]:
     """Load the trained linear piece-square model and return an evaluation function."""
-    # Import the module containing LinearPieceSquareModel
-    import importlib.util
-    import sys
-
-    # Load the module
-    module_path = os.path.join(
-        os.path.dirname(__file__), "31-train-piece-value-table.py"
-    )
-    spec = importlib.util.spec_from_file_location("__main__", module_path)
-    module = importlib.util.module_from_spec(spec)
-
-    # The model was saved when running as __main__, so we need to make the class available there
-    old_main = sys.modules.get("__main__")
-    sys.modules["__main__"] = module
-
-    try:
-        # Execute the module to define the class
-        spec.loader.exec_module(module)
-
-        # Now load the pickle
-        with open(model_path, "rb") as f:
-            model = pickle.load(f)
-
-    finally:
-        # Restore the original __main__
-        if old_main is not None:
-            sys.modules["__main__"] = old_main
+    with open(model_path, "rb") as f:
+        model = pickle.load(f)
 
     def linear_piece_square_eval(board: chess.Board) -> tuple[int, bool]:
         """Evaluate a position using the trained linear piece-square model."""
-        features = model.extract_features(board)
+        features = extract_features_piece_square(board)
         score = int(model.predict([features])[0])
         return score, False
 
@@ -170,13 +154,17 @@ def load_linear_models(model_dir: str) -> list[tuple[Callable, str]]:
         print(f"\nFound {len(linear_model_files)} Linear Piece-Square models:")
         for model_file in linear_model_files:
             # Extract info from filename
-            # Format: linear_piece_square_model_<size>.pkl
+            # Format: linear_piece_square_model_<size>_alpha<alpha>_<mates_suffix>_v2.pkl
             parts = (
                 model_file.replace("linear_piece_square_model_", "")
                 .replace(".pkl", "")
                 .split("_")
             )
-            model_name = f"linear_{parts[0]}"
+            if len(parts) >= 2:
+                # Include more parameters in the name to make it unique
+                model_name = f"linear_{'_'.join(parts[:3])}"  # size_alpha_mates
+            else:
+                model_name = f"linear_{parts[0]}"
 
             model_path = os.path.join(model_dir, model_file)
             print(f"  Loading {model_file}...")
@@ -243,13 +231,13 @@ def main(num_samples: int = 5000, graphs: bool = False) -> None:
     ]
 
     # Load all trained models
-    model_dir = os.path.join(os.path.dirname(__file__), "models")
+    model_dir = os.path.join(os.path.dirname(__file__), "saved_models")
 
     # Load Random Forest models
     all_functions.extend(load_random_forest_models(model_dir))
 
     # Load Linear Piece-Square models
-    # all_functions.extend(load_linear_models(model_dir))
+    all_functions.extend(load_linear_models(model_dir))
 
     # Load Neural Network models
     all_functions.extend(load_neural_network_models(model_dir))

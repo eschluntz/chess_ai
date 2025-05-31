@@ -59,18 +59,24 @@ What am I actually optimizing for?
 - `piece_value_eval()` just sums up the value of material
 - `piece_position_eval()` heuristic that uses positions of pieces
 
-```
-Model                        MAE   RMSE Spearman  Pearson   Win%      k/s        N
-------------------------------------------------------------------------------------------
-piece_value_eval*           2041   5827    0.375    0.387   47.4      133    9,590
-piece_position_eval         2051   5821    0.339    0.391   57.3       94    9,590
+![evals](learning/assets/eval_comparisons.png)
 
-(|Score| < 1000cp Subset)
-==================================================
-Model                        MAE   RMSE Spearman  Pearson   Win%      k/s        N
+```
+Model                        MAE   RMSE Spearman  Pearson   Win% k runs/s        N
 ------------------------------------------------------------------------------------------
-piece_value_eval*            119    204    0.272    0.342   43.1      133    8,523
-piece_position_eval          132    206    0.235    0.379   54.4       93    8,523
+piece_value_eval*           1494   4955    0.357    0.575   49.0       96    9,537
+linear_10e6_a10_no_mates    1494   5017    0.539    0.541   69.5       19    9,537
+linear_10e6_a10_yes_mates   1570   3451    0.370    0.722   59.6       19    9,537
+piece_position_eval         1506   4952    0.344    0.561   60.1       79    9,537
+
+ (|Score| < 1000cp Subset)
+==================================================
+Model                        MAE   RMSE Spearman  Pearson   Win% k runs/s        N
+------------------------------------------------------------------------------------------
+piece_value_eval*            115    198    0.254    0.290   46.2       96    8,784
+linear_10e6_a10_no_mates      96    155    0.472    0.516   67.8       19    8,784
+linear_10e6_a10_yes_mates    975   1790    0.241    0.308   56.8       19    8,784
+piece_position_eval          130    203    0.249    0.300   58.1       79    8,784
 ```
 
 ## Value Model Training
@@ -83,14 +89,18 @@ optional extra features:
 - 8x8 binary grid of all squares under attack for each side?
 
 ### model 0: Learning a piece value table
-[ ] sanity check and understand feature extraction
-[ ] is what's printed out including the base value of the piece?
-[ ] fix formatting of printed out tables (values too big)
 
+![graph](learning/assets/linear_piece_square_sweep_no_mates_v2.png)
+![graph](learning/assets/linear_piece_square_sweep_with_mates_v2.png)
+- more data the better (10e6)
+- alpha doesn't matter too much. 
+- `learning/saved_models/linear_piece_square_model_1000000_alpha10_no_mates_v2.pkl`
+- `learning/saved_models/linear_piece_square_model_1000000_alpha10_with_mates_v2.pkl`
 
-
-[ ] pick the best value for alpha
-[ ] add it to 20-eval-accuracy
+[x] sanity check and understand feature extraction
+[x] fix formatting of printed out tables (values too big)
+[x] parameter sweep for with and without checkmates
+[x] add it to 20-eval-accuracy
 [ ] add a function to core/eval.py that uses it
 
 ### Learning a random forest
