@@ -175,31 +175,53 @@ def load_linear_piece_square_model(model_path):
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model file not found: {model_path}")
 
-    # Load the module containing LinearPieceSquareModel
-    module_path = os.path.join(
-        os.path.dirname(__file__), "..", "learning", "31-train-piece-value-table.py"
+    # Import LinearPieceSquareModel class for pickle loading
+    spec_31 = importlib.util.spec_from_file_location(
+        "train_piece_value_table",
+        os.path.join(
+            os.path.dirname(__file__), "..", "learning", "31-train-piece-value-table.py"
+        ),
     )
-    spec = importlib.util.spec_from_file_location("__main__", module_path)
-    module = importlib.util.module_from_spec(spec)
-
+    train_piece_value_table = importlib.util.module_from_spec(spec_31)
+    
     # The model was saved when running as __main__, so we need to make the class available there
     old_main = sys.modules.get("__main__")
-    sys.modules["__main__"] = module
-
+    sys.modules["__main__"] = train_piece_value_table
+    
     try:
-        # Execute the module to define the class
-        spec.loader.exec_module(module)
+        spec_31.loader.exec_module(train_piece_value_table)
 
-        # Now load the pickle
         with open(model_path, "rb") as f:
             model = pickle.load(f)
-
     finally:
         # Restore the original __main__
         if old_main is not None:
             sys.modules["__main__"] = old_main
 
     return model
+
+
+def load_random_forest_model(model_path):
+    """Load a trained random forest model from disk."""
+    import os
+    import pickle
+
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}")
+
+    with open(model_path, "rb") as f:
+        data = pickle.load(f)
+
+    # Handle both old and new model formats
+    if isinstance(data, dict):
+        model = data["model"]
+        feature_type = data["feature_type"]
+    else:
+        # Old format - assume basic features
+        model = data
+        feature_type = "piece_square"
+
+    return model, feature_type
 
 
 def linear_piece_square_eval(board, model=None, model_path=None):
@@ -222,26 +244,138 @@ def linear_piece_square_eval(board, model=None, model_path=None):
     # Load model if not provided
     if model is None:
         if model_path is None:
-            # Try default path
+            # Try default path in saved_models
+            import glob
             import os
 
-            default_path = os.path.join(
-                os.path.dirname(__file__),
-                "..",
-                "learning",
-                "linear_piece_square_model_1000000.pkl",
+            saved_models_dir = os.path.join(
+                os.path.dirname(__file__), "..", "learning", "saved_models"
             )
-            if os.path.exists(default_path):
-                model_path = default_path
+            linear_models = glob.glob(
+                os.path.join(saved_models_dir, "linear_piece_square_model_*.pkl")
+            )
+            if linear_models:
+                # Use the most recent model
+                model_path = max(linear_models, key=os.path.getmtime)
             else:
                 raise ValueError(
-                    "No model provided and no default model found."
+                    "No model provided and no default model found. "
                     "Train a model using learning/31-train-piece-value-table.py"
                 )
         model = load_linear_piece_square_model(model_path)
 
     # Extract features and predict
-    features = model.extract_features(board)
+    from learning.feature_extraction import extract_features_piece_square
+
+    features = extract_features_piece_square(board)
     score = int(model.predict([features])[0])
 
     return score, False
+
+
+def random_forest_eval(board, model=None, model_path=None):
+    """Evaluates the board using a trained random forest model.
+
+    board: chess.Board object
+    model: Pre-loaded RandomForestRegressor instance (optional)
+    model_path: Path to saved model file (optional, used if model is None)
+
+    Returns:
+    score (int): The score of the board. Positive for white's advantage,
+    negative for black's.
+    done (bool): True if the game is over, False otherwise.
+    """
+    # Check if the game is done
+    score, done = _game_over_eval(board)
+    if done:
+        return (score, done)
+
+    # Load model if not provided
+    if model is None:
+        if model_path is None:
+            # Try default path in saved_models
+            import glob
+            import os
+
+            saved_models_dir = os.path.join(
+                os.path.dirname(__file__), "..", "learning", "saved_models"
+            )
+            rf_models = glob.glob(
+                os.path.join(saved_models_dir, "random_forest_chess_model_*.pkl")
+            )
+            if rf_models:
+                # Use the most recent model
+                model_path = max(rf_models, key=os.path.getmtime)
+            else:
+                raise ValueError(
+                    "No model provided and no default model found. "
+                    "Train a model using learning/30-train-simple-model.py"
+                )
+        model, _ = load_random_forest_model(model_path)
+
+    # Extract features and predict
+    from learning.feature_extraction import extract_features_piece_square
+
+    features = extract_features_piece_square(board)
+    score = int(model.predict([features])[0])
+
+    return score, False
+
+
+# Explicit evaluation functions for available models
+
+
+def linear_1m_alpha10_no_mates_eval(board):
+    """Evaluates using linear piece-square model: 1M samples, alpha=10, no mates."""
+    import os
+
+    model_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "learning",
+        "saved_models",
+        "linear_piece_square_model_1000000_alpha10_no_mates_v2.pkl",
+    )
+    return linear_piece_square_eval(board, model_path=model_path)
+
+
+def linear_1m_alpha10_with_mates_eval(board):
+    """Evaluates using linear piece-square model: 1M samples, alpha=10, with mates."""
+    import os
+
+    model_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "learning",
+        "saved_models",
+        "linear_piece_square_model_1000000_alpha10_with_mates_v2.pkl",
+    )
+    return linear_piece_square_eval(board, model_path=model_path)
+
+
+def rf_1m_estimators500_depth25_no_mates_eval(board):
+    """Evaluates using random forest model: 1M samples, 500 estimators, depth=25, no mates."""
+    import os
+
+    model_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "learning",
+        "saved_models",
+        "random_forest_chess_model_1000000_estimators500_depth25_no_mates_v2.pkl",
+    )
+    return random_forest_eval(board, model_path=model_path)
+
+
+def rf_330k_estimators1000_unlimited_no_mates_eval(board):
+    """Evaluates using random forest model: 330k samples, 1000 estimators, unlimited depth, no mates."""
+    import os
+
+    model_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "learning",
+        "saved_models",
+        "random_forest_chess_model_330000_estimators1000_depthNone_no_mates_v2.pkl",
+    )
+    return random_forest_eval(board, model_path=model_path)
