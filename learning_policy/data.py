@@ -16,23 +16,27 @@ VOCAB_CACHE: dict[str, int] | None = None
 
 # Cache paths
 CACHE_DIR = Path(__file__).parent / "cache"
-SHUFFLED_CACHE = CACHE_DIR / "shuffled_10m_dataset.parquet"
+SHUFFLED_CACHE = CACHE_DIR / "shuffled_100m_dataset.parquet"
 
 # Reserve first N positions for evaluation
 EVAL_SET_SIZE = 10_000
 
+# Size of the full streaming dataset (for epoch calculation)
+# Queried via: load_dataset_builder('Lichess/chess-position-evaluations').info.splits['train'].num_examples
+FULL_DATASET_SIZE = 784_537_782
+
 
 def get_raw_shuffled_data() -> pd.DataFrame:
     """
-    Load the shuffled 10M position dataset.
+    Load the shuffled 100M position dataset.
     Uses cached parquet if available, otherwise streams from HuggingFace.
     """
     if SHUFFLED_CACHE.exists():
         print(f"Loading from cache: {SHUFFLED_CACHE}")
         return pd.read_parquet(SHUFFLED_CACHE)
 
-    print("No cache found. Streaming from HuggingFace...")
-    pool_size = 10_000_000
+    print("No cache found. Streaming from HuggingFace (this will take a while)...")
+    pool_size = 100_000_000
 
     ds = load_dataset("Lichess/chess-position-evaluations", streaming=True)
     train_data = list(ds["train"].take(pool_size))
@@ -160,3 +164,5 @@ def get_index_to_move() -> dict[int, str]:
     """Get reverse mapping from index to move string."""
     vocab = build_move_vocabulary()
     return {idx: move for move, idx in vocab.items()}
+
+

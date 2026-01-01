@@ -32,6 +32,7 @@ Features:
 
 `https://huggingface.co/datasets/Lichess/chess-position-evaluations`
 - This contains both stockfish scores (cp/mate) and next move (line)
+- 785M rows
 
 `https://huggingface.co/datasets/Lichess/standard-chess-games`
  - Contains full games, and player ELOs, with about 6% of the games include Stockfish analysis evaluations.

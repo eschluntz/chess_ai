@@ -18,7 +18,12 @@ import torch.optim as optim
 import wandb
 from tqdm import tqdm
 
-from data import build_move_vocabulary, get_eval_data, get_index_to_move, get_train_data
+from data import (
+    build_move_vocabulary,
+    get_eval_data,
+    get_index_to_move,
+    get_train_data,
+)
 from features import extract_features_piece_square
 from mlp_model import SimplePolicyMLP
 
@@ -42,7 +47,7 @@ def prepare_data(
 
 
 def main(
-    num_train: int = 100_000,
+    num_train: int = 100_000_000,
     hidden_size: int = 256,
     batch_size: int = 256,
     lr: float = 0.001,
@@ -56,57 +61,57 @@ def main(
     print("Policy Network Training")
     print("=" * 60)
 
-    # Load data
-    print(f"\nLoading {num_train:,} training samples...")
-    train_df = get_train_data(num_train)
-    print("Loading eval samples...")
-    eval_df = get_eval_data()
-
+    # Load vocab first (needed for both modes)
     vocab = build_move_vocabulary()
     num_moves = len(vocab)
     print(f"Move vocabulary size: {num_moves}")
 
-    print("\nPreparing training data...")
-    X_train, y_train = prepare_data(train_df, vocab, device)
-    print(f"Training features shape: {X_train.shape}")
-
+    # Load eval data (always from shuffled cache)
+    print("Loading eval samples...")
+    eval_df = get_eval_data()
     print("Preparing eval data...")
     X_eval, y_eval = prepare_data(eval_df, vocab, device)
 
-    # Batch sampler
-    def get_batch(split: str):
-        X, y = (X_train, y_train) if split == "train" else (X_eval, y_eval)
-        ix = torch.randint(len(X), (batch_size,))
-        return X[ix], y[ix]
+    # Load training data
+    print(f"\nLoading {num_train:,} training samples...")
+    train_df = get_train_data(num_train)
+    print("Preparing training data...")
+    X_train, y_train = prepare_data(train_df, vocab, device)
+    print(f"Training features shape: {X_train.shape}")
+
+    def get_train_batch():
+        ix = torch.randint(len(X_train), (batch_size,))
+        return X_train[ix], y_train[ix]
+
+    def get_eval_batch():
+        ix = torch.randint(len(X_eval), (batch_size,))
+        return X_eval[ix], y_eval[ix]
 
     @torch.no_grad()
-    def estimate_loss():
+    def estimate_eval_loss():
+        """Estimate loss on eval set only."""
         model.eval()
-        out = {}
-        for split in ("train", "eval"):
-            losses = torch.zeros(eval_iters)
-            correct = 0
-            top5_correct = 0
-            total = 0
-            for k in range(eval_iters):
-                X_batch, y_batch = get_batch(split)
-                logits = model(X_batch)
-                losses[k] = criterion(logits, y_batch).item()
-                correct += (logits.argmax(dim=1) == y_batch).sum().item()
-                top5_preds = logits.topk(5, dim=1).indices
-                top5_correct += (top5_preds == y_batch.unsqueeze(1)).any(dim=1).sum().item()
-                total += len(y_batch)
-            out[f"{split}_loss"] = losses.mean().item()
-            out[f"{split}_acc"] = correct / total
-            out[f"{split}_top5_acc"] = top5_correct / total
+        losses = torch.zeros(eval_iters)
+        correct = 0
+        total = 0
+        for k in range(eval_iters):
+            X_batch, y_batch = get_eval_batch()
+            logits = model(X_batch)
+            losses[k] = criterion(logits, y_batch).item()
+            correct += (logits.argmax(dim=1) == y_batch).sum().item()
+            total += len(y_batch)
         model.train()
-        return out
+        return {
+            "eval_loss": losses.mean().item(),
+            "eval_acc": correct / total,
+        }
 
     # Create model
     print(f"\nDevice: {device}")
 
+    input_size = X_eval.shape[1]  # Same for all data
     model = SimplePolicyMLP(
-        input_size=X_train.shape[1],
+        input_size=input_size,
         num_moves=num_moves,
         hidden_size=hidden_size,
     ).to(device)
@@ -140,19 +145,25 @@ def main(
 
     # Checkpoint directory
     checkpoint_dir = Path("checkpoints") / wandb.run.name
-    checkpoint_dir.mkdir(parents=True)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     # Training loop
-    print("\n" + "-" * 110)
+    print("\n" + "-" * 90)
     print(
-        f"{'Time':>6} | {'Epochs':>6} | {'Step':>7} | {'Train Loss':>10} | {'Train Acc':>9} | {'Train Top5':>10} | "
-        f"{'Eval Loss':>10} | {'Eval Acc':>9} | {'Eval Top5':>10}"
+        f"{'Time':>6} | {'Samples':>10} | {'Step':>7} | {'Train Loss':>10} | {'Train Acc':>9} | "
+        f"{'Eval Loss':>10} | {'Eval Acc':>9}"
     )
-    print("-" * 110)
+    print("-" * 90)
 
     start_time = time.time()
     last_eval_time = start_time
     step = 0
+    samples_seen = 0
+
+    # Accumulate train metrics between evals
+    train_loss_sum = 0.0
+    train_correct = 0
+    train_total = 0
 
     model.train()
     while True:
@@ -161,32 +172,51 @@ def main(
             break
 
         # Training step
-        X_batch, y_batch = get_batch("train")
+        X_batch, y_batch = get_train_batch()
         optimizer.zero_grad()
         logits = model(X_batch)
         loss = criterion(logits, y_batch)
         loss.backward()
         optimizer.step()
+
         step += 1
+        samples_seen += batch_size
+
+        # Accumulate batch metrics
+        train_loss_sum += loss.item()
+        with torch.no_grad():
+            train_correct += (logits.argmax(dim=1) == y_batch).sum().item()
+        train_total += len(y_batch)
 
         # Periodic eval
         if time.time() - last_eval_time >= eval_interval_seconds:
             last_eval_time = time.time()
-            metrics = estimate_loss()
+            eval_metrics = estimate_eval_loss()
             elapsed = time.time() - start_time
 
-            epochs = (step * batch_size) / len(X_train)
+            # Compute average train metrics since last eval
+            train_loss = train_loss_sum / (train_total / batch_size)
+            train_acc = train_correct / train_total
+
             print(
-                f"{elapsed:>5.0f}s | {epochs:>6.2f} | {step:>7,} | {metrics['train_loss']:>10.4f} | {metrics['train_acc']:>8.2%} | {metrics['train_top5_acc']:>9.2%} | "
-                f"{metrics['eval_loss']:>10.4f} | {metrics['eval_acc']:>8.2%} | {metrics['eval_top5_acc']:>9.2%}"
+                f"{elapsed:>5.0f}s | {samples_seen:>10,} | {step:>7,} | {train_loss:>10.4f} | {train_acc:>8.2%} | "
+                f"{eval_metrics['eval_loss']:>10.4f} | {eval_metrics['eval_acc']:>8.2%}"
             )
 
-            epochs = (step * batch_size) / len(X_train)
+            epochs = samples_seen / len(X_train)
             wandb.log({
-                **metrics,
+                "train_loss": train_loss,
+                "train_acc": train_acc,
+                **eval_metrics,
+                "samples_seen": samples_seen,
                 "epochs": epochs,
                 "elapsed_seconds": elapsed,
             }, step=step)
+
+            # Reset accumulators
+            train_loss_sum = 0.0
+            train_correct = 0
+            train_total = 0
 
             # Save checkpoint
             torch.save({
@@ -195,18 +225,29 @@ def main(
             }, checkpoint_dir / "latest.pt")
 
     # Final eval
-    metrics = estimate_loss()
+    eval_metrics = estimate_eval_loss()
     elapsed = time.time() - start_time
-    epochs = (step * batch_size) / len(X_train)
 
-    print("-" * 110)
+    # Compute average train metrics since last eval
+    if train_total > 0:
+        train_loss = train_loss_sum / (train_total / batch_size)
+        train_acc = train_correct / train_total
+    else:
+        train_loss = 0.0
+        train_acc = 0.0
+
+    print("-" * 90)
     print(
-        f"{elapsed:>5.0f}s | {epochs:>6.2f} | {step:>7,} | {metrics['train_loss']:>10.4f} | {metrics['train_acc']:>8.2%} | {metrics['train_top5_acc']:>9.2%} | "
-        f"{metrics['eval_loss']:>10.4f} | {metrics['eval_acc']:>8.2%} | {metrics['eval_top5_acc']:>9.2%}"
+        f"{elapsed:>5.0f}s | {samples_seen:>10,} | {step:>7,} | {train_loss:>10.4f} | {train_acc:>8.2%} | "
+        f"{eval_metrics['eval_loss']:>10.4f} | {eval_metrics['eval_acc']:>8.2%}"
     )
 
+    epochs = samples_seen / len(X_train)
     wandb.log({
-        **metrics,
+        "train_loss": train_loss,
+        "train_acc": train_acc,
+        **eval_metrics,
+        "samples_seen": samples_seen,
         "epochs": epochs,
         "elapsed_seconds": elapsed,
     }, step=step)
@@ -217,6 +258,7 @@ def main(
         "optimizer_state_dict": optimizer.state_dict(),
     }, checkpoint_dir / "latest.pt")
     print(f"Checkpoint saved to {checkpoint_dir / 'latest.pt'}")
+
 
     # Show some predictions
     print("\nSample predictions:")
