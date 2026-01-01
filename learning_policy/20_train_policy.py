@@ -7,6 +7,7 @@ Run from learning_policy directory:
 """
 
 import time
+from pathlib import Path
 
 import chess
 import numpy as np
@@ -132,6 +133,10 @@ def main():
         },
     )
 
+    # Checkpoint directory
+    checkpoint_dir = Path("checkpoints") / wandb.run.id
+    checkpoint_dir.mkdir(parents=True)
+
     # Training loop
     print("\n" + "-" * 70)
     print(
@@ -176,6 +181,12 @@ def main():
                 "elapsed_seconds": elapsed,
             })
 
+            # Save checkpoint
+            torch.save({
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+            }, checkpoint_dir / "latest.pt")
+
     # Final eval
     metrics = estimate_loss()
     elapsed = time.time() - start_time
@@ -191,6 +202,13 @@ def main():
         "step": step,
         "elapsed_seconds": elapsed,
     })
+
+    # Save final checkpoint
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+    }, checkpoint_dir / "latest.pt")
+    print(f"Checkpoint saved to {checkpoint_dir / 'latest.pt'}")
 
     # Show some predictions
     print("\nSample predictions:")

@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chess Policy Visualizer</title>
+
+    <!-- Chess.js for game logic -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+
+    <!-- Chessboard.js -->
+    <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            color: #4ecca3;
+            margin-bottom: 20px;
+        }
+
+        .main-layout {
+            display: flex;
+            gap: 30px;
+            align-items: flex-start;
+        }
+
+        .board-container {
+            position: relative;
+            width: 500px;
+            flex-shrink: 0;
+        }
+
+        #board {
+            width: 500px;
+        }
+
+        #arrow-svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 500px;
+            height: 500px;
+            pointer-events: none;
+            z-index: 100;
+        }
+
+        .controls {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .control-group {
+            background: #16213e;
+            padding: 15px;
+            border-radius: 8px;
+        }
+
+        .control-group h3 {
+            margin: 0 0 10px 0;
+            color: #4ecca3;
+            font-size: 14px;
+            text-transform: uppercase;
+        }
+
+        .turn-indicator {
+            font-size: 18px;
+            font-weight: bold;
+            padding: 10px;
+            text-align: center;
+            border-radius: 6px;
+        }
+
+        .turn-white {
+            background: #f0f0f0;
+            color: #222;
+        }
+
+        .turn-black {
+            background: #333;
+            color: #fff;
+        }
+
+        .slider-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .slider-container input[type="range"] {
+            flex: 1;
+        }
+
+        .slider-value {
+            min-width: 30px;
+            text-align: center;
+            font-weight: bold;
+            color: #4ecca3;
+        }
+
+        .button-row {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        button {
+            background: #4ecca3;
+            color: #1a1a2e;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: #3dbd94;
+        }
+
+        button.secondary {
+            background: #393e6f;
+            color: #eee;
+        }
+
+        button.secondary:hover {
+            background: #4a4f80;
+        }
+
+        .fen-input {
+            display: flex;
+            gap: 10px;
+        }
+
+        .fen-input input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #393e6f;
+            border-radius: 6px;
+            background: #0f0f23;
+            color: #eee;
+            font-family: monospace;
+            font-size: 12px;
+        }
+
+        .move-list {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .move-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 10px;
+            border-radius: 4px;
+            margin-bottom: 4px;
+        }
+
+        .move-item:nth-child(odd) {
+            background: #0f0f23;
+        }
+
+        .move-name {
+            font-family: monospace;
+            font-weight: bold;
+        }
+
+        .move-prob {
+            color: #4ecca3;
+        }
+
+        .prob-bar {
+            height: 4px;
+            background: #4ecca3;
+            border-radius: 2px;
+            margin-top: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Chess Policy Visualizer</h1>
+
+        <div class="main-layout">
+            <div class="board-container">
+                <div id="board"></div>
+                <svg id="arrow-svg" viewBox="0 0 500 500"></svg>
+            </div>
+
+            <div class="controls">
+                <div class="control-group">
+                    <div id="turn-indicator" class="turn-indicator turn-white">White to move</div>
+                </div>
+
+                <div class="control-group">
+                    <h3>Top Moves</h3>
+                    <div class="slider-container">
+                        <span>N:</span>
+                        <input type="range" id="top-n" min="1" max="10" value="5">
+                        <span class="slider-value" id="top-n-value">5</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3>Sample Move</h3>
+                    <div class="button-row">
+                        <button id="sample-greedy">Sample (temp=0)</button>
+                        <button id="sample-random">Sample (temp=1)</button>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3>Board Controls</h3>
+                    <div class="button-row">
+                        <button id="reset-btn" class="secondary">Reset</button>
+                        <button id="flip-btn" class="secondary">Flip Board</button>
+                        <button id="undo-btn" class="secondary">Undo</button>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3>Set Position (FEN)</h3>
+                    <div class="fen-input">
+                        <input type="text" id="fen-input" placeholder="Enter FEN...">
+                        <button id="set-fen-btn">Set</button>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3>Top Moves</h3>
+                    <div id="move-list" class="move-list"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Game state
+        let game = new Chess();
+        let board = null;
+        let boardOrientation = 'white';
+
+        // Square size (board is 500px, 8 squares)
+        const SQUARE_SIZE = 500 / 8;
+
+        // Initialize board
+        function initBoard() {
+            const config = {
+                draggable: true,
+                position: 'start',
+                orientation: boardOrientation,
+                onDragStart: onDragStart,
+                onDrop: onDrop,
+                onSnapEnd: onSnapEnd,
+                pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png'
+            };
+            board = Chessboard('board', config);
+        }
+
+        function onDragStart(source, piece, position, orientation) {
+            // Don't allow picking up pieces if game is over
+            if (game.game_over()) return false;
+
+            // Only allow current player to move
+            if ((game.turn() === 'w' && piece.search(/^b/) !== -1) ||
+                (game.turn() === 'b' && piece.search(/^w/) !== -1)) {
+                return false;
+            }
+        }
+
+        function onDrop(source, target) {
+            // Try the move
+            const move = game.move({
+                from: source,
+                to: target,
+                promotion: 'q' // Always promote to queen for simplicity
+            });
+
+            if (move === null) return 'snapback';
+
+            updateDisplay();
+        }
+
+        function onSnapEnd() {
+            board.position(game.fen());
+        }
+
+        // Get square center coordinates
+        function getSquareCenter(square) {
+            const file = square.charCodeAt(0) - 97; // a=0, b=1, etc.
+            const rank = parseInt(square[1]) - 1;   // 1=0, 2=1, etc.
+
+            let x, y;
+            if (boardOrientation === 'white') {
+                x = file * SQUARE_SIZE + SQUARE_SIZE / 2;
+                y = (7 - rank) * SQUARE_SIZE + SQUARE_SIZE / 2;
+            } else {
+                x = (7 - file) * SQUARE_SIZE + SQUARE_SIZE / 2;
+                y = rank * SQUARE_SIZE + SQUARE_SIZE / 2;
+            }
+
+            return { x, y };
+        }
+
+        // Draw arrows for moves
+        function drawArrows(moves) {
+            const svg = document.getElementById('arrow-svg');
+            svg.innerHTML = '';
+
+            if (moves.length === 0) return;
+
+            // Create defs for arrowhead markers
+            const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+
+            moves.forEach((move, idx) => {
+                // Create unique marker for each arrow
+                const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+                marker.setAttribute('id', `arrowhead-${idx}`);
+                marker.setAttribute('markerWidth', '4');
+                marker.setAttribute('markerHeight', '4');
+                marker.setAttribute('refX', '3');
+                marker.setAttribute('refY', '2');
+                marker.setAttribute('orient', 'auto');
+
+                const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+                polygon.setAttribute('points', '0 0, 4 2, 0 4');
+                const color = move.legal ? getArrowColor(move.probability, moves[0].probability) : '#e74c3c';
+                polygon.setAttribute('fill', color);
+
+                marker.appendChild(polygon);
+                defs.appendChild(marker);
+            });
+
+            svg.appendChild(defs);
+
+            // Draw arrows
+            moves.forEach((move, idx) => {
+                const from = move.move.substring(0, 2);
+                const to = move.move.substring(2, 4);
+
+                const fromPos = getSquareCenter(from);
+                const toPos = getSquareCenter(to);
+
+                // Shorten arrow to not overlap with pieces
+                const dx = toPos.x - fromPos.x;
+                const dy = toPos.y - fromPos.y;
+                const len = Math.sqrt(dx * dx + dy * dy);
+                const offset = 15;
+
+                const startX = fromPos.x + (dx / len) * offset;
+                const startY = fromPos.y + (dy / len) * offset;
+                const endX = toPos.x - (dx / len) * offset;
+                const endY = toPos.y - (dy / len) * offset;
+
+                const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                line.setAttribute('x1', startX);
+                line.setAttribute('y1', startY);
+                line.setAttribute('x2', endX);
+                line.setAttribute('y2', endY);
+
+                // Opacity and width based on probability
+                const opacity = 0.3 + 0.7 * (move.probability / moves[0].probability);
+                const width = 3 + 5 * (move.probability / moves[0].probability);
+
+                const color = move.legal ? getArrowColor(move.probability, moves[0].probability) : '#e74c3c';
+                line.setAttribute('stroke', color);
+                line.setAttribute('stroke-width', width);
+                line.setAttribute('stroke-opacity', opacity);
+                line.setAttribute('marker-end', `url(#arrowhead-${idx})`);
+
+                svg.appendChild(line);
+            });
+        }
+
+        // Get arrow color based on probability (green for high, yellow for low)
+        function getArrowColor(prob, maxProb) {
+            const ratio = prob / maxProb;
+            // Interpolate from yellow (#f4d03f) to green (#2ecc71)
+            const r = Math.round(244 - (244 - 46) * ratio);
+            const g = Math.round(208 + (204 - 208) * ratio);
+            const b = Math.round(63 + (113 - 63) * ratio);
+            return `rgb(${r}, ${g}, ${b})`;
+        }
+
+        // Update move list display
+        function updateMoveList(moves) {
+            const list = document.getElementById('move-list');
+            list.innerHTML = '';
+
+            moves.forEach(move => {
+                const div = document.createElement('div');
+                div.className = 'move-item';
+
+                const probPercent = (move.probability * 100).toFixed(1);
+                const illegalStyle = move.legal ? '' : 'color: #e74c3c; text-decoration: line-through;';
+                const illegalLabel = move.legal ? '' : ' (illegal)';
+                div.innerHTML = `
+                    <span class="move-name" style="${illegalStyle}">${move.move}${illegalLabel}</span>
+                    <span class="move-prob" style="${illegalStyle}">${probPercent}%</span>
+                `;
+
+                const bar = document.createElement('div');
+                bar.className = 'prob-bar';
+                bar.style.width = `${move.probability * 100 / moves[0].probability * 100}%`;
+                bar.style.background = move.legal ? '#4ecca3' : '#e74c3c';
+                div.appendChild(bar);
+
+                list.appendChild(div);
+            });
+        }
+
+        // Update turn indicator
+        function updateTurnIndicator() {
+            const indicator = document.getElementById('turn-indicator');
+            if (game.turn() === 'w') {
+                indicator.textContent = 'White to move';
+                indicator.className = 'turn-indicator turn-white';
+            } else {
+                indicator.textContent = 'Black to move';
+                indicator.className = 'turn-indicator turn-black';
+            }
+
+            if (game.game_over()) {
+                if (game.in_checkmate()) {
+                    indicator.textContent = (game.turn() === 'w' ? 'Black' : 'White') + ' wins!';
+                } else {
+                    indicator.textContent = 'Draw';
+                }
+            }
+        }
+
+        // Fetch predictions and update display
+        async function updateDisplay() {
+            updateTurnIndicator();
+            document.getElementById('fen-input').value = game.fen();
+
+            if (game.game_over()) {
+                drawArrows([]);
+                updateMoveList([]);
+                return;
+            }
+
+            const topN = document.getElementById('top-n').value;
+            const response = await fetch(`/api/predict?fen=${encodeURIComponent(game.fen())}&top_n=${topN}`);
+            const data = await response.json();
+
+            drawArrows(data.moves);
+            updateMoveList(data.moves);
+        }
+
+        // Sample a move from the model
+        async function sampleMove(temperature) {
+            if (game.game_over()) return;
+
+            const response = await fetch('/api/sample', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    fen: game.fen(),
+                    temperature: temperature
+                })
+            });
+            const data = await response.json();
+
+            // Make the move
+            const from = data.move.substring(0, 2);
+            const to = data.move.substring(2, 4);
+            const promotion = data.move.length > 4 ? data.move[4] : undefined;
+
+            game.move({ from, to, promotion });
+            board.position(game.fen());
+            updateDisplay();
+        }
+
+        // Event listeners
+        document.getElementById('top-n').addEventListener('input', (e) => {
+            document.getElementById('top-n-value').textContent = e.target.value;
+            updateDisplay();
+        });
+
+        document.getElementById('sample-greedy').addEventListener('click', () => sampleMove(0));
+        document.getElementById('sample-random').addEventListener('click', () => sampleMove(1));
+
+        document.getElementById('reset-btn').addEventListener('click', () => {
+            game.reset();
+            board.position('start');
+            updateDisplay();
+        });
+
+        document.getElementById('flip-btn').addEventListener('click', () => {
+            boardOrientation = boardOrientation === 'white' ? 'black' : 'white';
+            board.orientation(boardOrientation);
+            updateDisplay();
+        });
+
+        document.getElementById('undo-btn').addEventListener('click', () => {
+            game.undo();
+            board.position(game.fen());
+            updateDisplay();
+        });
+
+        document.getElementById('set-fen-btn').addEventListener('click', () => {
+            const fen = document.getElementById('fen-input').value.trim();
+            if (game.load(fen)) {
+                board.position(fen);
+                updateDisplay();
+            } else {
+                alert('Invalid FEN');
+            }
+        });
+
+        document.getElementById('fen-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                document.getElementById('set-fen-btn').click();
+            }
+        });
+
+        // Initialize
+        initBoard();
+        updateDisplay();
+    </script>
+</body>
+</html>
