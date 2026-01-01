@@ -9,3 +9,8 @@ Learn a policy model to directly predict next moves, and in the process, compare
 `https://huggingface.co/datasets/Lichess/standard-chess-games`
  - Contains full games, and player ELOs, with about 6% of the games include Stockfish analysis evaluations.
 
+## Resources
+
+https://arxiv.org/abs/2409.12272
+- "Mastering Chess with a Transformer Model" 
+- Interesting variants of positional embeddings

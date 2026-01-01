@@ -5,7 +5,7 @@ Tests for feature extraction utilities.
 import chess
 import numpy as np
 
-from learning.feature_extraction import (
+from learning_board_value.feature_extraction import (
     NUM_CASTLING_FEATURES,
     NUM_COLORS,
     NUM_MATERIAL_FEATURES,
