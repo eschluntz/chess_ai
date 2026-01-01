@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import chess
+import fire
 import numpy as np
 import torch
 import torch.nn as nn
@@ -40,16 +41,15 @@ def prepare_data(
     return X, y
 
 
-def main():
-    # Hyperparameters
-    num_train = 100_000
-    hidden_size = 256
-    batch_size = 256
-    lr = 0.001
-    max_seconds = 300  # 5 minutes
-    eval_interval_seconds = 30
-    eval_iters = 50  # batches for train loss estimate
-
+def main(
+    num_train: int = 100_000,
+    hidden_size: int = 256,
+    batch_size: int = 256,
+    lr: float = 0.001,
+    max_seconds: int = 300,
+    eval_interval_seconds: int = 30,
+    eval_iters: int = 50,
+):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print("=" * 60)
@@ -86,15 +86,19 @@ def main():
         for split in ("train", "eval"):
             losses = torch.zeros(eval_iters)
             correct = 0
+            top5_correct = 0
             total = 0
             for k in range(eval_iters):
                 X_batch, y_batch = get_batch(split)
                 logits = model(X_batch)
                 losses[k] = criterion(logits, y_batch).item()
                 correct += (logits.argmax(dim=1) == y_batch).sum().item()
+                top5_preds = logits.topk(5, dim=1).indices
+                top5_correct += (top5_preds == y_batch.unsqueeze(1)).any(dim=1).sum().item()
                 total += len(y_batch)
             out[f"{split}_loss"] = losses.mean().item()
             out[f"{split}_acc"] = correct / total
+            out[f"{split}_top5_acc"] = top5_correct / total
         model.train()
         return out
 
@@ -121,6 +125,7 @@ def main():
     # Wandb setup
     wandb.init(
         project="chess-policy",
+        name=f"num_train_{num_train}",
         config={
             "num_train": num_train,
             "num_eval": len(X_eval),
@@ -134,16 +139,16 @@ def main():
     )
 
     # Checkpoint directory
-    checkpoint_dir = Path("checkpoints") / wandb.run.id
+    checkpoint_dir = Path("checkpoints") / wandb.run.name
     checkpoint_dir.mkdir(parents=True)
 
     # Training loop
-    print("\n" + "-" * 70)
+    print("\n" + "-" * 110)
     print(
-        f"{'Time':>6} | {'Step':>7} | {'Train Loss':>10} | {'Train Acc':>9} | "
-        f"{'Eval Loss':>10} | {'Eval Acc':>9}"
+        f"{'Time':>6} | {'Epochs':>6} | {'Step':>7} | {'Train Loss':>10} | {'Train Acc':>9} | {'Train Top5':>10} | "
+        f"{'Eval Loss':>10} | {'Eval Acc':>9} | {'Eval Top5':>10}"
     )
-    print("-" * 70)
+    print("-" * 110)
 
     start_time = time.time()
     last_eval_time = start_time
@@ -170,16 +175,18 @@ def main():
             metrics = estimate_loss()
             elapsed = time.time() - start_time
 
+            epochs = (step * batch_size) / len(X_train)
             print(
-                f"{elapsed:>5.0f}s | {step:>7,} | {metrics['train_loss']:>10.4f} | {metrics['train_acc']:>8.2%} | "
-                f"{metrics['eval_loss']:>10.4f} | {metrics['eval_acc']:>8.2%}"
+                f"{elapsed:>5.0f}s | {epochs:>6.2f} | {step:>7,} | {metrics['train_loss']:>10.4f} | {metrics['train_acc']:>8.2%} | {metrics['train_top5_acc']:>9.2%} | "
+                f"{metrics['eval_loss']:>10.4f} | {metrics['eval_acc']:>8.2%} | {metrics['eval_top5_acc']:>9.2%}"
             )
 
+            epochs = (step * batch_size) / len(X_train)
             wandb.log({
                 **metrics,
-                "step": step,
+                "epochs": epochs,
                 "elapsed_seconds": elapsed,
-            })
+            }, step=step)
 
             # Save checkpoint
             torch.save({
@@ -190,18 +197,19 @@ def main():
     # Final eval
     metrics = estimate_loss()
     elapsed = time.time() - start_time
+    epochs = (step * batch_size) / len(X_train)
 
-    print("-" * 70)
+    print("-" * 110)
     print(
-        f"{elapsed:>5.0f}s | {step:>7,} | {metrics['train_loss']:>10.4f} | {metrics['train_acc']:>8.2%} | "
-        f"{metrics['eval_loss']:>10.4f} | {metrics['eval_acc']:>8.2%}"
+        f"{elapsed:>5.0f}s | {epochs:>6.2f} | {step:>7,} | {metrics['train_loss']:>10.4f} | {metrics['train_acc']:>8.2%} | {metrics['train_top5_acc']:>9.2%} | "
+        f"{metrics['eval_loss']:>10.4f} | {metrics['eval_acc']:>8.2%} | {metrics['eval_top5_acc']:>9.2%}"
     )
 
     wandb.log({
         **metrics,
-        "step": step,
+        "epochs": epochs,
         "elapsed_seconds": elapsed,
-    })
+    }, step=step)
 
     # Save final checkpoint
     torch.save({
@@ -232,4 +240,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    fire.Fire(main)
