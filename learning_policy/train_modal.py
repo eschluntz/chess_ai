@@ -11,7 +11,7 @@ app = modal.App("chess-policy")
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .pip_install("torch", "wandb", "numpy", "python-chess", "datasets", "tqdm")
+    .pip_install("torch", "wandb", "numpy", "python-chess")
     .add_local_file("data.py", "/root/data.py")
     .add_local_file("features.py", "/root/features.py")
     .add_local_file("mlp_model.py", "/root/mlp_model.py")
@@ -35,7 +35,7 @@ def train(
     max_seconds: int = 1200,
     eval_interval_seconds: int = 60,
     eval_iters: int = 50,
-    run_name: str = None,
+    run_name: str = "precomputed2",
     checkpoint_dir: str = "checkpoints",
     num_workers: int = 0,
 ):
@@ -72,7 +72,7 @@ def train(
     cache_dir = "/root/cache" if is_modal else None
     train_loader, eval_loader, vocab = get_dataloaders(batch_size, cache_dir=cache_dir, num_workers=num_workers)
     num_moves = len(vocab)
-    total_samples = len(train_loader.dataset)
+    total_samples = train_loader.num_samples
     print(f"[{run_name}] Training on {total_samples:,} samples")
 
     # Create model
@@ -263,8 +263,7 @@ def train(
 def sweep():
     """Run parallel training with different configurations."""
     configs = [
-        {"hidden_size": 2048, "num_workers": w, "run_name": f"hidden_size_fixed_2048_{w}"}
-        for w in [4, 8]
+        {"hidden_size": 2048, "run_name": "precomputed"}
     ]
 
     def make_run_name(cfg: dict) -> str:

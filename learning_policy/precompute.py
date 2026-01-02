@@ -18,7 +18,7 @@ data_volume = modal.Volume.from_name("chess-policy-data", create_if_missing=True
 
 
 @app.function(image=image, volumes={"/root/cache": data_volume}, timeout=86400)
-def precompute_shard(shard_idx: int, num_shards: int, train_size: int, eval_size: int):
+def precompute_shard(shard_idx: int, start_idx: int, end_idx: int, eval_size: int):
     """Process one shard of the training set."""
     import pickle
     import sys
@@ -35,13 +35,8 @@ def precompute_shard(shard_idx: int, num_shards: int, train_size: int, eval_size
     precomputed_dir = f"{cache_dir}/precomputed"
     shards_dir = f"{precomputed_dir}/shards"
 
-    # Calculate this shard's range
-    shard_size = train_size // num_shards
-    start = shard_idx * shard_size
-    end = start + shard_size if shard_idx < num_shards - 1 else train_size
-    actual_size = end - start
-
-    print(f"[Shard {shard_idx}] Processing indices {start:,} to {end:,} ({actual_size:,} samples)")
+    shard_size = end_idx - start_idx
+    print(f"[Shard {shard_idx}] Processing indices {start_idx:,} to {end_idx:,} ({shard_size:,} samples)")
 
     # Load vocab (saved by coordinator)
     with open(f"{precomputed_dir}/vocab.pkl", "rb") as f:
@@ -58,16 +53,16 @@ def precompute_shard(shard_idx: int, num_shards: int, train_size: int, eval_size
     # Create shard arrays as memory-mapped files (doesn't use RAM)
     shard_X = np.lib.format.open_memmap(
         f"{shards_dir}/train_features_{shard_idx}.npy",
-        mode='w+', dtype=np.float32, shape=(actual_size, TOTAL_FEATURES)
+        mode='w+', dtype=np.float32, shape=(shard_size, TOTAL_FEATURES)
     )
     shard_y = np.lib.format.open_memmap(
         f"{shards_dir}/train_labels_{shard_idx}.npy",
-        mode='w+', dtype=np.int64, shape=(actual_size,)
+        mode='w+', dtype=np.int64, shape=(shard_size,)
     )
 
     # Process this shard (offset by eval_size since eval comes first in shuffled dataset)
-    for i in tqdm(range(actual_size), desc=f"Shard {shard_idx}"):
-        example = ds[eval_size + start + i]
+    for i in tqdm(range(shard_size), desc=f"Shard {shard_idx}"):
+        example = ds[eval_size + start_idx + i]
         board = chess.Board(example["fen"])
         shard_X[i] = extract_features_piece_square(board)
         shard_y[i] = vocab[example["line"].split()[0]]
@@ -76,14 +71,15 @@ def precompute_shard(shard_idx: int, num_shards: int, train_size: int, eval_size
     del shard_X, shard_y
 
     print(f"[Shard {shard_idx}] Done!")
-    return shard_idx, actual_size
+    return shard_idx, shard_size
 
 
 @app.function(image=image, volumes={"/root/cache": data_volume}, timeout=86400)
 def precompute(num_samples: int = 50_000_000, eval_size: int = 10_000, num_shards: int = 20):
     """Coordinate parallel precomputation of features."""
-    import pickle
     import os
+    import pickle
+    import shutil
     import sys
     sys.path.insert(0, "/root")
 
@@ -101,7 +97,7 @@ def precompute(num_samples: int = 50_000_000, eval_size: int = 10_000, num_shard
     os.makedirs(precomputed_dir, exist_ok=True)
     os.makedirs(shards_dir, exist_ok=True)
 
-    # Load dataset
+    # Load dataset first to get accurate sizes
     print("Loading dataset...")
     ds = load_dataset(
         "Lichess/chess-position-evaluations",
@@ -110,66 +106,111 @@ def precompute(num_samples: int = 50_000_000, eval_size: int = 10_000, num_shard
     )
     print(f"Dataset size: {len(ds):,}")
 
-    # Build vocabulary
-    print("Building vocabulary...")
-    moves = set()
-    sample_size = min(1_000_000, len(ds))
-    for i in range(0, sample_size, 10_000):
-        batch = ds.select(range(i, min(i + 10_000, sample_size)))
-        moves.update(line.split()[0] for line in batch["line"])
-
-    # Add all possible promotions
-    files = "abcdefgh"
-    promo_pieces = "qrbn"
-    for from_rank, to_rank in [("7", "8"), ("2", "1")]:
-        for f_idx, from_file in enumerate(files):
-            from_sq = f"{from_file}{from_rank}"
-            for to_f_idx in [f_idx - 1, f_idx, f_idx + 1]:
-                if 0 <= to_f_idx <= 7:
-                    to_sq = f"{files[to_f_idx]}{to_rank}"
-                    moves.update(f"{from_sq}{to_sq}{p}" for p in promo_pieces)
-
-    vocab = {move: idx for idx, move in enumerate(sorted(moves))}
-    print(f"Vocabulary size: {len(vocab)}")
-
-    # Save vocab for workers
-    with open(f"{precomputed_dir}/vocab.pkl", "wb") as f:
-        pickle.dump(vocab, f)
-
-    # Shuffle and calculate sizes
-    print("Shuffling dataset...")
-    ds = ds.shuffle(seed=42)
     total_samples = min(num_samples, len(ds))
     train_size = total_samples - eval_size
+    shard_size = train_size // num_shards
+
+    # Check for existing shards (for resume) - verify they're complete
+    existing_shards = set()
+    for i in range(num_shards):
+        features_path = f"{shards_dir}/train_features_{i}.npy"
+        labels_path = f"{shards_dir}/train_labels_{i}.npy"
+        if os.path.exists(features_path) and os.path.exists(labels_path):
+            # Verify shard is complete by checking size
+            labels = np.load(labels_path, mmap_mode='r')
+            expected_size = shard_size if i < num_shards - 1 else train_size - (num_shards - 1) * shard_size
+            if len(labels) >= expected_size * 0.99:  # Allow 1% tolerance
+                existing_shards.add(i)
+            else:
+                print(f"Shard {i} incomplete: {len(labels):,} < {expected_size:,}, will re-run")
+            del labels
+
+    if existing_shards:
+        print(f"Found {len(existing_shards)} complete shards: {sorted(existing_shards)}")
+
+    missing_shards = [i for i in range(num_shards) if i not in existing_shards]
+
+    # Check if vocab exists (for resume)
+    vocab_path = f"{precomputed_dir}/vocab.pkl"
+    if os.path.exists(vocab_path):
+        print("Loading existing vocab...")
+        with open(vocab_path, "rb") as f:
+            vocab = pickle.load(f)
+        print(f"Vocabulary size: {len(vocab)}")
+    else:
+        # Build vocabulary
+        print("Building vocabulary...")
+        moves = set()
+        sample_size = min(1_000_000, len(ds))
+        for i in range(0, sample_size, 10_000):
+            batch = ds.select(range(i, min(i + 10_000, sample_size)))
+            moves.update(line.split()[0] for line in batch["line"])
+
+        # Add all possible promotions
+        files = "abcdefgh"
+        promo_pieces = "qrbn"
+        for from_rank, to_rank in [("7", "8"), ("2", "1")]:
+            for f_idx, from_file in enumerate(files):
+                from_sq = f"{from_file}{from_rank}"
+                for to_f_idx in [f_idx - 1, f_idx, f_idx + 1]:
+                    if 0 <= to_f_idx <= 7:
+                        to_sq = f"{files[to_f_idx]}{to_rank}"
+                        moves.update(f"{from_sq}{to_sq}{p}" for p in promo_pieces)
+
+        vocab = {move: idx for idx, move in enumerate(sorted(moves))}
+        print(f"Vocabulary size: {len(vocab)}")
+
+        # Save vocab for workers
+        with open(vocab_path, "wb") as f:
+            pickle.dump(vocab, f)
+
+    # Shuffle dataset
+    print("Shuffling dataset...")
+    ds = ds.shuffle(seed=42)
     print(f"Using {total_samples:,} samples: {train_size:,} train, {eval_size:,} eval")
 
-    # Process eval set in coordinator (small, not worth parallelizing)
-    print("Processing eval set...")
-    eval_X = np.zeros((eval_size, TOTAL_FEATURES), dtype=np.float32)
-    eval_y = np.zeros(eval_size, dtype=np.int64)
-    for i in tqdm(range(eval_size)):
-        example = ds[i]
-        board = chess.Board(example["fen"])
-        eval_X[i] = extract_features_piece_square(board)
-        eval_y[i] = vocab[example["line"].split()[0]]
+    # Check if eval exists (for resume)
+    eval_features_path = f"{precomputed_dir}/eval_features.npy"
+    if os.path.exists(eval_features_path):
+        print("Eval set already exists, skipping.")
+    else:
+        # Process eval set in coordinator (small, not worth parallelizing)
+        print("Processing eval set...")
+        eval_X = np.zeros((eval_size, TOTAL_FEATURES), dtype=np.float32)
+        eval_y = np.zeros(eval_size, dtype=np.int64)
+        for i in tqdm(range(eval_size)):
+            example = ds[i]
+            board = chess.Board(example["fen"])
+            eval_X[i] = extract_features_piece_square(board)
+            eval_y[i] = vocab[example["line"].split()[0]]
 
-    np.save(f"{precomputed_dir}/eval_features.npy", eval_X)
-    np.save(f"{precomputed_dir}/eval_labels.npy", eval_y)
-    print("Eval set saved.")
+        np.save(eval_features_path, eval_X)
+        np.save(f"{precomputed_dir}/eval_labels.npy", eval_y)
+        print("Eval set saved.")
 
     # Commit so workers can see vocab and eval files
     data_volume.commit()
 
-    # Fan out to workers
-    print(f"Launching {num_shards} parallel workers...")
-    results = list(precompute_shard.map(
-        range(num_shards),
-        kwargs={"num_shards": num_shards, "train_size": train_size, "eval_size": eval_size},
-    ))
-    print(f"All workers complete: {results}")
+    # Fan out to workers (only missing shards)
+    if missing_shards:
+        print(f"Launching {len(missing_shards)} workers for shards: {missing_shards}")
 
-    # Reload to see workers' files
-    data_volume.reload()
+        # Calculate start/end for each missing shard
+        def shard_bounds(i):
+            start = i * shard_size
+            end = start + shard_size if i < num_shards - 1 else train_size
+            return start, end
+
+        results = list(precompute_shard.starmap(
+            [(i, *shard_bounds(i), eval_size) for i in missing_shards]
+        ))
+        print(f"All workers complete: {results}")
+        # Delete dataset to release file handles before reload
+        del ds
+        data_volume.reload()
+    else:
+        print("All shards already exist, skipping to concatenation.")
+        del ds
 
     # Concatenate shards
     print("Concatenating shards...")
@@ -199,7 +240,6 @@ def precompute(num_samples: int = 50_000_000, eval_size: int = 10_000, num_shard
 
     # Clean up shards
     print("Cleaning up shards...")
-    import shutil
     shutil.rmtree(shards_dir)
 
     # Final commit
