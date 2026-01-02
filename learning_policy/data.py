@@ -1,113 +1,64 @@
 """
-Data loading using HuggingFace datasets with memory-mapped Arrow storage.
-No manual sharding needed - Arrow handles it automatically.
+Data loading from precomputed numpy files.
 """
 
-from functools import partial
+import pickle
 from pathlib import Path
 
-import chess
 import numpy as np
 import torch
-from datasets import load_dataset
-from torch.utils.data import DataLoader
-
-from features import extract_features_piece_square
+from torch.utils.data import DataLoader, Dataset
 
 CACHE_DIR = Path(__file__).parent / "cache"
-EVAL_SIZE = 10_000
 
 
-def get_all_promotions() -> set[str]:
-    """Generate all possible promotion moves in UCI format."""
-    promotions = set()
-    files = "abcdefgh"
-    promo_pieces = "qrbn"
+class PrecomputedDataset(Dataset):
+    """Dataset that reads from memory-mapped numpy arrays."""
 
-    for from_rank, to_rank in [("7", "8"), ("2", "1")]:  # White and black promotions
-        for f_idx, from_file in enumerate(files):
-            from_sq = f"{from_file}{from_rank}"
-            # Forward and diagonal captures
-            for to_f_idx in [f_idx - 1, f_idx, f_idx + 1]:
-                if 0 <= to_f_idx <= 7:
-                    to_sq = f"{files[to_f_idx]}{to_rank}"
-                    promotions.update(f"{from_sq}{to_sq}{p}" for p in promo_pieces)
+    def __init__(self, features_path: Path, labels_path: Path):
+        self.features = np.load(features_path, mmap_mode='r')
+        self.labels = np.load(labels_path, mmap_mode='r')
 
-    return promotions
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        return self.features[idx], self.labels[idx]
 
 
-def build_move_vocabulary(ds) -> dict[str, int]:
-    """Build vocabulary from dataset + all promotions."""
-    print("Building vocabulary...")
-    moves = set()
-
-    # Sample in batches to avoid loading all at once
-    sample_size = min(1_000_000, len(ds))
-    for i in range(0, sample_size, 10_000):
-        batch = ds.select(range(i, min(i + 10_000, sample_size)))
-        moves.update(line.split()[0] for line in batch["line"])
-
-    moves.update(get_all_promotions())
-
-    vocab = {move: idx for idx, move in enumerate(sorted(moves))}
-    print(f"Vocabulary size: {len(vocab)}")
-    return vocab
-
-
-def load_full_dataset():
-    """Load full dataset with Arrow memory-mapping (doesn't load into RAM)."""
-    print("Loading dataset (memory-mapped)...")
-    ds = load_dataset(
-        "Lichess/chess-position-evaluations",
-        split="train",
-        cache_dir=str(CACHE_DIR),
-    )
-    print(f"Dataset size: {len(ds):,} samples")
-    return ds
-
-
-def collate_fn(batch, vocab):
-    """Convert batch of examples to feature tensors (on CPU)."""
-    features = []
-    labels = []
-    for example in batch:
-        board = chess.Board(example["fen"])
-        features.append(extract_features_piece_square(board))
-        target_move = example["line"].split()[0]
-        labels.append(vocab[target_move])
-
+def collate_fn(batch):
+    """Convert batch to tensors."""
+    features, labels = zip(*batch)
     X = torch.tensor(np.array(features), dtype=torch.float32)
-    y = torch.tensor(labels, dtype=torch.long)
+    y = torch.tensor(np.array(labels), dtype=torch.long)
     return X, y
 
 
-def get_dataloaders(batch_size: int, num_workers: int = 0, on_checkpoint=None):
-    """Load dataset, build vocab, return dataloaders and vocab."""
-    cache_existed = CACHE_DIR.exists() and any(CACHE_DIR.iterdir())
+def get_dataloaders(batch_size: int, cache_dir: str = None, num_workers: int = 0):
+    """Load precomputed features from numpy files."""
+    if cache_dir is None:
+        cache_dir = CACHE_DIR
+    precomputed_dir = Path(cache_dir) / "precomputed"
 
-    ds = load_full_dataset()
-    vocab = build_move_vocabulary(ds)
+    train_ds = PrecomputedDataset(
+        precomputed_dir / "train_features.npy",
+        precomputed_dir / "train_labels.npy",
+    )
+    eval_ds = PrecomputedDataset(
+        precomputed_dir / "eval_features.npy",
+        precomputed_dir / "eval_labels.npy",
+    )
 
-    if on_checkpoint and not cache_existed:
-        print("Committing after initial cache build...")
-        on_checkpoint()
-
-    # Shuffle first (avoids bias if original data is ordered), then split
-    # Note: just creates index mapping, no disk write. Reads will be random access.
-    ds = ds.shuffle(seed=42)
-
-    eval_ds = ds.select(range(EVAL_SIZE))
-    train_ds = ds.select(range(EVAL_SIZE, len(ds)))
+    with open(precomputed_dir / "vocab.pkl", "rb") as f:
+        vocab = pickle.load(f)
 
     print(f"Train: {len(train_ds):,}, Eval: {len(eval_ds):,}")
-
-    collate = partial(collate_fn, vocab=vocab)
 
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
-        shuffle=False,  # Already shuffled above
-        collate_fn=collate,
+        shuffle=False,
+        collate_fn=collate_fn,
         num_workers=num_workers,
     )
 
@@ -115,7 +66,7 @@ def get_dataloaders(batch_size: int, num_workers: int = 0, on_checkpoint=None):
         eval_ds,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=collate,
+        collate_fn=collate_fn,
         num_workers=num_workers,
     )
 

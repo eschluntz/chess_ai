@@ -68,9 +68,9 @@ def train(
     print(f"[{run_name}] Policy Network Training")
     print("=" * 60)
 
-    # Load data (with checkpoints on Modal)
-    commit_fn = data_volume.commit if is_modal else None
-    train_loader, eval_loader, vocab = get_dataloaders(batch_size, num_workers=num_workers, on_checkpoint=commit_fn)
+    # Load data from precomputed features
+    cache_dir = "/root/cache" if is_modal else None
+    train_loader, eval_loader, vocab = get_dataloaders(batch_size, cache_dir=cache_dir, num_workers=num_workers)
     num_moves = len(vocab)
     total_samples = len(train_loader.dataset)
     print(f"[{run_name}] Training on {total_samples:,} samples")
