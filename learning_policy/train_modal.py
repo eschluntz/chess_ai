@@ -23,6 +23,7 @@ checkpoint_volume = modal.Volume.from_name("chess-policy-checkpoints", create_if
 
 @app.function(
     image=image,
+    gpu="T4",
     secrets=[modal.Secret.from_name("wandb-secret")],
     volumes={"/root/cache": data_volume, "/root/checkpoints": checkpoint_volume},
     timeout=86400,
@@ -31,7 +32,7 @@ def train(
     hidden_size: int = 256,
     batch_size: int = 256,
     lr: float = 0.001,
-    max_seconds: int = 3600,
+    max_seconds: int = 1200,
     eval_interval_seconds: int = 60,
     eval_iters: int = 50,
     run_name: str = None,
@@ -148,6 +149,11 @@ def train(
     train_total = 0
     total_elapsed = elapsed_before
 
+    # Timing accumulators
+    time_data = 0.0
+    time_train = 0.0
+    time_eval = 0.0
+
     def save_checkpoint():
         tmp_path = checkpoint_path + ".tmp"
         torch.save({
@@ -170,13 +176,17 @@ def train(
         if total_elapsed >= max_seconds:
             break
 
+        t0 = time.time()
         X_batch, y_batch = next(train_iter)
+        time_data += time.time() - t0
 
+        t0 = time.time()
         optimizer.zero_grad()
         logits = model(X_batch)
         loss = criterion(logits, y_batch)
         loss.backward()
         optimizer.step()
+        time_train += time.time() - t0
 
         step += 1
         samples_seen += len(X_batch)
@@ -187,15 +197,22 @@ def train(
 
         if time.time() - last_eval_time >= eval_interval_seconds:
             last_eval_time = time.time()
+            t0 = time.time()
             eval_metrics = estimate_eval_loss()
+            time_eval += time.time() - t0
             total_elapsed = elapsed_before + (time.time() - start_time)
 
             train_loss = train_loss_sum / (train_total / batch_size)
             train_acc = train_correct / train_total
 
+            time_total = time_data + time_train + time_eval
+            pct_data = 100 * time_data / time_total
+            pct_train = 100 * time_train / time_total
+            pct_eval = 100 * time_eval / time_total
+
             print(
                 f"{total_elapsed:>5.0f}s | {samples_seen:>12,} | {step:>7,} | {train_loss:>10.4f} | {train_acc:>8.2%} | "
-                f"{eval_metrics['eval_acc']:>8.2%}"
+                f"{eval_metrics['eval_acc']:>8.2%} | data {pct_data:.0f}% train {pct_train:.0f}% eval {pct_eval:.0f}%"
             )
 
             wandb.log({
@@ -203,6 +220,9 @@ def train(
                 "train_acc": train_acc,
                 **eval_metrics,
                 "samples_seen": samples_seen,
+                "pct_data": pct_data,
+                "pct_train": pct_train,
+                "pct_eval": pct_eval,
             }, step=step)
 
             train_loss_sum = 0.0
@@ -230,6 +250,53 @@ def train(
         "num_params": num_params,
         "total_steps": step,
     }
+
+
+@app.function(image=image, timeout=1800)
+def sweep():
+    """Run parallel training with different configurations."""
+    configs = [
+        {"hidden_size": h, "run_name": f"hidden_size_{h}"}
+        for h in [256, 512, 1024, 2048]
+    ]
+
+    def make_run_name(cfg: dict) -> str:
+        parts = [f"{k[0]}{v}" for k, v in sorted(cfg.items()) if k != "run_name"]
+        return "_".join(parts) or "default"
+
+    for cfg in configs:
+        if "run_name" not in cfg:
+            cfg["run_name"] = make_run_name(cfg)
+
+    print(f"Launching {len(configs)} parallel runs:")
+    for cfg in configs:
+        print(f"  {cfg['run_name']}: {cfg}")
+
+    raw_results = list(train.starmap([(cfg,) for cfg in configs], return_exceptions=True, wrap_returned_exceptions=False))
+
+    results = []
+    failed = []
+    for cfg, r in zip(configs, raw_results):
+        if isinstance(r, Exception):
+            failed.append((cfg["run_name"], r))
+        else:
+            results.append(r)
+
+    print("\n" + "=" * 60)
+    print("SWEEP RESULTS")
+    print("=" * 60)
+
+    if failed:
+        print(f"\nFAILED ({len(failed)}/{len(configs)}):")
+        for name, exc in failed:
+            print(f"  {name:>8}: {type(exc).__name__}: {exc}")
+
+    if results:
+        print(f"\nSUCCEEDED ({len(results)}/{len(configs)}):")
+        for r in sorted(results, key=lambda x: x["final_eval_acc"], reverse=True):
+            print(f"  {r['run_name']:>8}: {r['final_eval_acc']:.2%} ({r['num_params']:,} params)")
+
+    return results
 
 
 @app.local_entrypoint()
