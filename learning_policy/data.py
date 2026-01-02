@@ -66,8 +66,8 @@ def load_full_dataset():
     return ds
 
 
-def collate_fn(batch, vocab, device):
-    """Convert batch of examples to feature tensors."""
+def collate_fn(batch, vocab):
+    """Convert batch of examples to feature tensors (on CPU)."""
     features = []
     labels = []
     for example in batch:
@@ -76,21 +76,20 @@ def collate_fn(batch, vocab, device):
         target_move = example["line"].split()[0]
         labels.append(vocab[target_move])
 
-    X = torch.tensor(np.array(features), dtype=torch.float32, device=device)
-    y = torch.tensor(labels, dtype=torch.long, device=device)
+    X = torch.tensor(np.array(features), dtype=torch.float32)
+    y = torch.tensor(labels, dtype=torch.long)
     return X, y
 
 
-def get_dataloaders(batch_size: int, device: torch.device, on_checkpoint=None):
+def get_dataloaders(batch_size: int, num_workers: int = 0, on_checkpoint=None):
     """Load dataset, build vocab, return dataloaders and vocab."""
-    ds = load_full_dataset()
-    if on_checkpoint:
-        print("Committing after dataset load...")
-        on_checkpoint()
+    cache_existed = CACHE_DIR.exists() and any(CACHE_DIR.iterdir())
 
+    ds = load_full_dataset()
     vocab = build_move_vocabulary(ds)
-    if on_checkpoint:
-        print("Committing after vocab build...")
+
+    if on_checkpoint and not cache_existed:
+        print("Committing after initial cache build...")
         on_checkpoint()
 
     # Shuffle first (avoids bias if original data is ordered), then split
@@ -102,14 +101,14 @@ def get_dataloaders(batch_size: int, device: torch.device, on_checkpoint=None):
 
     print(f"Train: {len(train_ds):,}, Eval: {len(eval_ds):,}")
 
-    collate = partial(collate_fn, vocab=vocab, device=device)
+    collate = partial(collate_fn, vocab=vocab)
 
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
         shuffle=False,  # Already shuffled above
         collate_fn=collate,
-        num_workers=0,
+        num_workers=num_workers,
     )
 
     eval_loader = DataLoader(
@@ -117,7 +116,7 @@ def get_dataloaders(batch_size: int, device: torch.device, on_checkpoint=None):
         batch_size=batch_size,
         shuffle=False,
         collate_fn=collate,
-        num_workers=0,
+        num_workers=num_workers,
     )
 
     return train_loader, eval_loader, vocab

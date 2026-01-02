@@ -37,6 +37,7 @@ def train(
     eval_iters: int = 50,
     run_name: str = None,
     checkpoint_dir: str = "checkpoints",
+    num_workers: int = 0,
 ):
     import sys
     sys.path.insert(0, "/root")
@@ -58,18 +59,21 @@ def train(
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
-    print(f"Using device: {device}")
+    print(f"[{run_name}] Using device: {device}")
+
+    if run_name is None:
+        run_name = f"h{hidden_size}"
 
     print("=" * 60)
-    print("Policy Network Training")
+    print(f"[{run_name}] Policy Network Training")
     print("=" * 60)
 
     # Load data (with checkpoints on Modal)
     commit_fn = data_volume.commit if is_modal else None
-    train_loader, eval_loader, vocab = get_dataloaders(batch_size, device, on_checkpoint=commit_fn)
+    train_loader, eval_loader, vocab = get_dataloaders(batch_size, num_workers=num_workers, on_checkpoint=commit_fn)
     num_moves = len(vocab)
     total_samples = len(train_loader.dataset)
-    print(f"Training on {total_samples:,} samples")
+    print(f"[{run_name}] Training on {total_samples:,} samples")
 
     # Create model
     model = SimplePolicyMLP(input_size=TOTAL_FEATURES, num_moves=num_moves, hidden_size=hidden_size).to(device)
@@ -86,6 +90,7 @@ def train(
         total = 0
         for _ in range(eval_iters):
             X_batch, y_batch = next(eval_iter)
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
             logits = model(X_batch)
             losses.append(criterion(logits, y_batch).item())
             correct += (logits.argmax(dim=1) == y_batch).sum().item()
@@ -94,14 +99,12 @@ def train(
         return {"eval_loss": sum(losses) / len(losses), "eval_acc": correct / total}
 
     num_params = sum(p.numel() for p in model.parameters())
-    if run_name is None:
-        run_name = f"h{hidden_size}"
 
-    print(f"\nModel: {num_params:,} parameters")
-    print(f"Hidden size: {hidden_size}")
-    print(f"Batch size: {batch_size}")
-    print(f"Learning rate: {lr}")
-    print(f"Max time: {max_seconds}s")
+    print(f"[{run_name}] Model: {num_params:,} parameters")
+    print(f"[{run_name}] Hidden size: {hidden_size}")
+    print(f"[{run_name}] Batch size: {batch_size}")
+    print(f"[{run_name}] Learning rate: {lr}")
+    print(f"[{run_name}] Max time: {max_seconds}s")
 
     os.makedirs(checkpoint_dir, exist_ok=True)
     checkpoint_path = os.path.join(checkpoint_dir, f"{run_name}.pt")
@@ -111,14 +114,14 @@ def train(
     wandb_run_id = None
 
     if os.path.exists(checkpoint_path):
-        print(f"Loading checkpoint from {checkpoint_path}")
+        print(f"[{run_name}] Loading checkpoint from {checkpoint_path}")
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         step = ckpt["step"]
         elapsed_before = ckpt["elapsed_seconds"]
         wandb_run_id = ckpt.get("wandb_run_id")
-        print(f"Resumed from step {step}, {elapsed_before:.0f}s already elapsed")
+        print(f"[{run_name}] Resumed from step {step}, {elapsed_before:.0f}s already elapsed")
 
     wandb.init(
         project="chess-policy",
@@ -137,9 +140,9 @@ def train(
     )
     wandb_run_id = wandb.run.id
 
-    print("\n" + "-" * 80)
-    print(f"{'Time':>6} | {'Samples':>12} | {'Step':>7} | {'Train Loss':>10} | {'Train Acc':>9} | {'Eval Acc':>9}")
-    print("-" * 80)
+    print(f"[{run_name}] " + "-" * 70)
+    print(f"[{run_name}] {'Time':>6} | {'Samples':>12} | {'Step':>7} | {'Train Loss':>10} | {'Train Acc':>9} | {'Eval Acc':>9}")
+    print(f"[{run_name}] " + "-" * 70)
 
     start_time = time.time()
     last_eval_time = start_time
@@ -151,6 +154,7 @@ def train(
 
     # Timing accumulators
     time_data = 0.0
+    time_transfer = 0.0
     time_train = 0.0
     time_eval = 0.0
 
@@ -181,6 +185,10 @@ def train(
         time_data += time.time() - t0
 
         t0 = time.time()
+        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+        time_transfer += time.time() - t0
+
+        t0 = time.time()
         optimizer.zero_grad()
         logits = model(X_batch)
         loss = criterion(logits, y_batch)
@@ -205,14 +213,15 @@ def train(
             train_loss = train_loss_sum / (train_total / batch_size)
             train_acc = train_correct / train_total
 
-            time_total = time_data + time_train + time_eval
+            time_total = time_data + time_transfer + time_train + time_eval
             pct_data = 100 * time_data / time_total
+            pct_transfer = 100 * time_transfer / time_total
             pct_train = 100 * time_train / time_total
             pct_eval = 100 * time_eval / time_total
 
             print(
-                f"{total_elapsed:>5.0f}s | {samples_seen:>12,} | {step:>7,} | {train_loss:>10.4f} | {train_acc:>8.2%} | "
-                f"{eval_metrics['eval_acc']:>8.2%} | data {pct_data:.0f}% train {pct_train:.0f}% eval {pct_eval:.0f}%"
+                f"[{run_name}] {total_elapsed:>5.0f}s | {samples_seen:>12,} | {step:>7,} | {train_loss:>10.4f} | {train_acc:>8.2%} | "
+                f"{eval_metrics['eval_acc']:>8.2%} | data {pct_data:.0f}% xfer {pct_transfer:.0f}% train {pct_train:.0f}% eval {pct_eval:.0f}%"
             )
 
             wandb.log({
@@ -221,6 +230,7 @@ def train(
                 **eval_metrics,
                 "samples_seen": samples_seen,
                 "pct_data": pct_data,
+                "pct_transfer": pct_transfer,
                 "pct_train": pct_train,
                 "pct_eval": pct_eval,
             }, step=step)
@@ -235,14 +245,11 @@ def train(
     total_elapsed = elapsed_before + (time.time() - start_time)
 
     print("-" * 80)
-    print(f"Final eval_acc: {eval_metrics['eval_acc']:.2%}")
+    print(f"[{run_name}] Final eval_acc: {eval_metrics['eval_acc']:.2%}")
 
     save_checkpoint()
-    if is_modal:
-        data_volume.commit()
-
     wandb.finish()
-    print(f"\nTraining complete. {step:,} steps in {total_elapsed:.0f}s")
+    print(f"[{run_name}] Training complete. {step:,} steps in {total_elapsed:.0f}s")
 
     return {
         "run_name": run_name,
@@ -256,8 +263,8 @@ def train(
 def sweep():
     """Run parallel training with different configurations."""
     configs = [
-        {"hidden_size": h, "run_name": f"hidden_size_{h}"}
-        for h in [256, 512, 1024, 2048]
+        {"hidden_size": 2048, "num_workers": w, "run_name": f"hidden_size_fixed_2048_{w}"}
+        for w in [4, 8]
     ]
 
     def make_run_name(cfg: dict) -> str:
@@ -272,15 +279,15 @@ def sweep():
     for cfg in configs:
         print(f"  {cfg['run_name']}: {cfg}")
 
-    raw_results = list(train.starmap([(cfg,) for cfg in configs], return_exceptions=True, wrap_returned_exceptions=False))
+    handles = [(cfg["run_name"], train.spawn(**cfg)) for cfg in configs]
 
     results = []
     failed = []
-    for cfg, r in zip(configs, raw_results):
-        if isinstance(r, Exception):
-            failed.append((cfg["run_name"], r))
-        else:
-            results.append(r)
+    for name, handle in handles:
+        try:
+            results.append(handle.get())
+        except Exception as e:
+            failed.append((name, e))
 
     print("\n" + "=" * 60)
     print("SWEEP RESULTS")
@@ -289,12 +296,12 @@ def sweep():
     if failed:
         print(f"\nFAILED ({len(failed)}/{len(configs)}):")
         for name, exc in failed:
-            print(f"  {name:>8}: {type(exc).__name__}: {exc}")
+            print(f"  {name:>20}: {type(exc).__name__}: {exc}")
 
     if results:
         print(f"\nSUCCEEDED ({len(results)}/{len(configs)}):")
         for r in sorted(results, key=lambda x: x["final_eval_acc"], reverse=True):
-            print(f"  {r['run_name']:>8}: {r['final_eval_acc']:.2%} ({r['num_params']:,} params)")
+            print(f"  {r['run_name']:>20}: {r['final_eval_acc']:.2%} ({r['num_params']:,} params)")
 
     return results
 
