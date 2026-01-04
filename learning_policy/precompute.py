@@ -3,6 +3,7 @@ Precompute features for chess policy training.
 
 Usage:
     modal run precompute.py
+    modal run precompute.py --fresh  # Force fresh start, ignore existing shards
 """
 import modal
 
@@ -51,6 +52,7 @@ def precompute_shard(shard_idx: int, start_idx: int, end_idx: int, eval_size: in
     # Create memmap (pre-allocates with zeros)
     features_path = f"{shards_dir}/train_features_{shard_idx}.npy"
     labels_path = f"{shards_dir}/train_labels_{shard_idx}.npy"
+    done_path = f"{shards_dir}/shard_{shard_idx}.done"
 
     shard_X = np.lib.format.open_memmap(
         features_path, mode='w+', dtype=np.float32, shape=(shard_size, TOTAL_FEATURES)
@@ -67,19 +69,30 @@ def precompute_shard(shard_idx: int, start_idx: int, end_idx: int, eval_size: in
 
     del shard_X, shard_y
 
-    # Validate: reload and check last row isn't zeros (would indicate incomplete write)
+    # Validate: reload and check rows aren't zeros
     check_X = np.load(features_path, mmap_mode='r')
     if np.all(check_X[-1] == 0):
         raise RuntimeError(f"Shard {shard_idx} failed validation: last row is zeros")
+    if np.all(check_X[len(check_X) // 2] == 0):
+        raise RuntimeError(f"Shard {shard_idx} failed validation: middle row is zeros")
     del check_X
+
+    # Write completion marker AFTER validation passes
+    # This is the key to safe resume - no marker means incomplete
+    with open(done_path, "w") as f:
+        f.write(f"{shard_size}\n")
+
+    # Commit shard to volume so coordinator can see it
+    data_volume.commit()
 
     print(f"[Shard {shard_idx}] Done and validated!")
     return shard_idx, shard_size
 
 
 @app.function(image=image, volumes={"/root/cache": data_volume}, timeout=86400)
-def precompute(num_samples: int = 50_000_000, eval_size: int = 10_000, num_shards: int = 20):
-    """Precompute features from chess positions."""
+def precompute(num_samples: int = 50_000_000, eval_size: int = 10_000, num_shards: int = 20, fresh: bool = False):
+    """Precompute features from chess positions. Supports safe resume."""
+    import gc
     import os
     import pickle
     import shutil
@@ -97,13 +110,18 @@ def precompute(num_samples: int = 50_000_000, eval_size: int = 10_000, num_shard
     precomputed_dir = f"{cache_dir}/precomputed"
     shards_dir = f"{precomputed_dir}/shards"
 
-    # Clean slate - remove any existing precomputed data
-    if os.path.exists(precomputed_dir):
-        print("Removing existing precomputed data...")
-        shutil.rmtree(precomputed_dir)
+    # Fresh start if requested or if final files already exist (completed previous run)
+    final_features_path = f"{precomputed_dir}/train_features.npy"
+    if fresh:
+        print("Fresh start requested, removing existing data...")
+        if os.path.exists(precomputed_dir):
+            shutil.rmtree(precomputed_dir)
+    elif os.path.exists(final_features_path):
+        print("Final files already exist. Use --fresh to regenerate.")
+        return
 
-    os.makedirs(precomputed_dir)
-    os.makedirs(shards_dir)
+    os.makedirs(precomputed_dir, exist_ok=True)
+    os.makedirs(shards_dir, exist_ok=True)
 
     # Load dataset
     print("Loading dataset...")
@@ -121,79 +139,154 @@ def precompute(num_samples: int = 50_000_000, eval_size: int = 10_000, num_shard
     print(f"Using {total_samples:,} samples: {eval_size:,} eval, {train_size:,} train")
     print(f"  {num_shards} shards of ~{shard_size:,} samples each")
 
-    # Build vocabulary
-    print("Building vocabulary...")
-    moves = set()
-    sample_size = min(1_000_000, len(ds))
-    for i in range(0, sample_size, 10_000):
-        batch = ds.select(range(i, min(i + 10_000, sample_size)))
-        moves.update(line.split()[0] for line in batch["line"])
+    def shard_expected_size(i):
+        return shard_size if i < num_shards - 1 else train_size - (num_shards - 1) * shard_size
 
-    # Add all possible promotions
-    files = "abcdefgh"
-    for from_rank, to_rank in [("7", "8"), ("2", "1")]:
-        for f_idx, from_file in enumerate(files):
-            from_sq = f"{from_file}{from_rank}"
-            for to_f_idx in [f_idx - 1, f_idx, f_idx + 1]:
-                if 0 <= to_f_idx <= 7:
-                    to_sq = f"{files[to_f_idx]}{to_rank}"
-                    moves.update(f"{from_sq}{to_sq}{p}" for p in "qrbn")
+    # Check for existing vocab or build new one
+    vocab_path = f"{precomputed_dir}/vocab.pkl"
+    if os.path.exists(vocab_path):
+        print("Loading existing vocab...")
+        with open(vocab_path, "rb") as f:
+            vocab = pickle.load(f)
+        print(f"Vocabulary size: {len(vocab)}")
+    else:
+        print("Building vocabulary...")
+        moves = set()
+        sample_size = min(1_000_000, len(ds))
+        for i in range(0, sample_size, 10_000):
+            batch = ds.select(range(i, min(i + 10_000, sample_size)))
+            moves.update(line.split()[0] for line in batch["line"])
 
-    vocab = {move: idx for idx, move in enumerate(sorted(moves))}
-    print(f"Vocabulary size: {len(vocab)}")
+        files = "abcdefgh"
+        for from_rank, to_rank in [("7", "8"), ("2", "1")]:
+            for f_idx, from_file in enumerate(files):
+                from_sq = f"{from_file}{from_rank}"
+                for to_f_idx in [f_idx - 1, f_idx, f_idx + 1]:
+                    if 0 <= to_f_idx <= 7:
+                        to_sq = f"{files[to_f_idx]}{to_rank}"
+                        moves.update(f"{from_sq}{to_sq}{p}" for p in "qrbn")
 
-    with open(f"{precomputed_dir}/vocab.pkl", "wb") as f:
-        pickle.dump(vocab, f)
+        vocab = {move: idx for idx, move in enumerate(sorted(moves))}
+        print(f"Vocabulary size: {len(vocab)}")
+
+        with open(vocab_path, "wb") as f:
+            pickle.dump(vocab, f)
 
     # Shuffle dataset
     print("Shuffling dataset...")
     ds = ds.shuffle(seed=42)
 
-    # Process eval set
-    print("Processing eval set...")
-    eval_X = np.zeros((eval_size, TOTAL_FEATURES), dtype=np.float32)
-    eval_y = np.zeros(eval_size, dtype=np.int64)
+    # Check for existing eval set or create new one
+    eval_features_path = f"{precomputed_dir}/eval_features.npy"
+    if os.path.exists(eval_features_path):
+        print("Eval set already exists, skipping.")
+    else:
+        print("Processing eval set...")
+        eval_X = np.zeros((eval_size, TOTAL_FEATURES), dtype=np.float32)
+        eval_y = np.zeros(eval_size, dtype=np.int64)
 
-    for i in tqdm(range(eval_size)):
-        example = ds[i]
-        board = chess.Board(example["fen"])
-        eval_X[i] = extract_features_piece_square(board)
-        eval_y[i] = vocab[example["line"].split()[0]]
+        for i in tqdm(range(eval_size)):
+            example = ds[i]
+            board = chess.Board(example["fen"])
+            eval_X[i] = extract_features_piece_square(board)
+            eval_y[i] = vocab[example["line"].split()[0]]
 
-    np.save(f"{precomputed_dir}/eval_features.npy", eval_X)
-    np.save(f"{precomputed_dir}/eval_labels.npy", eval_y)
-    del eval_X, eval_y
-    print("Eval set saved.")
+        np.save(eval_features_path, eval_X)
+        np.save(f"{precomputed_dir}/eval_labels.npy", eval_y)
+        del eval_X, eval_y
+        print("Eval set saved.")
 
-    # Commit so workers can see vocab
+    # Commit so workers can see vocab and eval
     data_volume.commit()
 
-    # Launch parallel workers
-    print(f"Launching {num_shards} parallel workers...")
+    # Check for completed shards (safe resume)
+    # A shard is complete IFF: .done marker exists AND content validates
+    print("Checking for completed shards...")
+    existing_shards = set()
+    for i in range(num_shards):
+        done_path = f"{shards_dir}/shard_{i}.done"
+        features_path = f"{shards_dir}/train_features_{i}.npy"
+        labels_path = f"{shards_dir}/train_labels_{i}.npy"
 
-    def shard_bounds(i):
-        start = i * shard_size
-        end = start + shard_size if i < num_shards - 1 else train_size
-        return start, end
+        # Must have completion marker
+        if not os.path.exists(done_path):
+            continue
 
-    del ds
-    results = list(precompute_shard.starmap(
-        [(i, *shard_bounds(i), eval_size) for i in range(num_shards)]
-    ))
-    print(f"All {len(results)} workers complete")
+        # Must have data files
+        if not os.path.exists(features_path) or not os.path.exists(labels_path):
+            continue
 
-    data_volume.reload()
+        # Validate content
+        features = np.load(features_path, mmap_mode='r')
+        expected = shard_expected_size(i)
+
+        if len(features) != expected:
+            print(f"  Shard {i}: wrong size {len(features):,} != {expected:,}, will re-run")
+            del features
+            continue
+
+        if np.all(features[-1] == 0):
+            print(f"  Shard {i}: last row is zeros, will re-run")
+            del features
+            continue
+
+        if np.all(features[len(features) // 2] == 0):
+            print(f"  Shard {i}: middle row is zeros, will re-run")
+            del features
+            continue
+
+        existing_shards.add(i)
+        del features
+
+    missing_shards = [i for i in range(num_shards) if i not in existing_shards]
+
+    if existing_shards:
+        print(f"Found {len(existing_shards)} complete shards: {sorted(existing_shards)}")
+    if not missing_shards:
+        print("All shards complete, skipping to concatenation.")
+    else:
+        # Clean up any partial files for missing shards before re-running
+        for i in missing_shards:
+            for path in [
+                f"{shards_dir}/train_features_{i}.npy",
+                f"{shards_dir}/train_labels_{i}.npy",
+                f"{shards_dir}/shard_{i}.done",
+            ]:
+                if os.path.exists(path):
+                    os.remove(path)
+
+        print(f"Launching {len(missing_shards)} workers for shards: {missing_shards}")
+
+        def shard_bounds(i):
+            start = i * shard_size
+            end = start + shard_size if i < num_shards - 1 else train_size
+            return start, end
+
+        del ds
+        gc.collect()
+
+        results = list(precompute_shard.starmap(
+            [(i, *shard_bounds(i), eval_size) for i in missing_shards]
+        ))
+        print(f"All {len(results)} workers complete")
+
+        gc.collect()
+        data_volume.reload()
 
     # Validate all shards before concatenating
-    print("Validating shards...")
+    print("Validating all shards...")
     for shard_idx in range(num_shards):
         features_path = f"{shards_dir}/train_features_{shard_idx}.npy"
         labels_path = f"{shards_dir}/train_labels_{shard_idx}.npy"
+        done_path = f"{shards_dir}/shard_{shard_idx}.done"
+
+        if not os.path.exists(done_path):
+            raise RuntimeError(f"Shard {shard_idx} missing completion marker")
 
         features = np.load(features_path, mmap_mode='r')
         labels = np.load(labels_path, mmap_mode='r')
 
-        expected = shard_size if shard_idx < num_shards - 1 else train_size - (num_shards - 1) * shard_size
+        expected = shard_expected_size(shard_idx)
 
         if len(labels) != expected:
             raise RuntimeError(f"Shard {shard_idx} wrong size: {len(labels):,} != {expected:,}")
@@ -253,5 +346,5 @@ def precompute(num_samples: int = 50_000_000, eval_size: int = 10_000, num_shard
 
 
 @app.local_entrypoint()
-def main():
-    precompute.remote()
+def main(fresh: bool = False):
+    precompute.remote(fresh=fresh)
