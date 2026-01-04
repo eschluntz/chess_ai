@@ -30,12 +30,12 @@ checkpoint_volume = modal.Volume.from_name("chess-policy-checkpoints", create_if
 )
 def train(
     hidden_size: int = 256,
+    num_layers: int = 1,
     batch_size: int = 256,
     lr: float = 0.001,
     max_seconds: int = 1200,
     eval_interval_seconds: int = 60,
-    eval_iters: int = 50,
-    run_name: str = "precomputed2",
+    run_name: str = None,
     checkpoint_dir: str = "checkpoints",
     num_workers: int = 0,
 ):
@@ -44,7 +44,6 @@ def train(
 
     import os
     import time
-    from itertools import cycle
 
     import torch
     import torch.nn as nn
@@ -62,7 +61,7 @@ def train(
     print(f"[{run_name}] Using device: {device}")
 
     if run_name is None:
-        run_name = f"h{hidden_size}"
+        run_name = f"L{num_layers}_H{hidden_size}"
 
     print("=" * 60)
     print(f"[{run_name}] Policy Network Training")
@@ -76,11 +75,14 @@ def train(
     print(f"[{run_name}] Training on {total_samples:,} samples")
 
     # Create model
-    model = SimplePolicyMLP(input_size=TOTAL_FEATURES, num_moves=num_moves, hidden_size=hidden_size).to(device)
+    model = SimplePolicyMLP(
+        input_size=TOTAL_FEATURES,
+        num_moves=num_moves,
+        hidden_size=hidden_size,
+        num_layers=num_layers,
+    ).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
-
-    eval_iter = cycle(eval_loader)
 
     @torch.no_grad()
     def estimate_eval_loss():
@@ -88,8 +90,7 @@ def train(
         losses = []
         correct = 0
         total = 0
-        for _ in range(eval_iters):
-            X_batch, y_batch = next(eval_iter)
+        for X_batch, y_batch in eval_loader:
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
             logits = model(X_batch)
             losses.append(criterion(logits, y_batch).item())
@@ -101,9 +102,8 @@ def train(
     num_params = sum(p.numel() for p in model.parameters())
 
     print(f"[{run_name}] Model: {num_params:,} parameters")
-    print(f"[{run_name}] Hidden size: {hidden_size}")
-    print(f"[{run_name}] Batch size: {batch_size}")
-    print(f"[{run_name}] Learning rate: {lr}")
+    print(f"[{run_name}] Layers: {num_layers}, Hidden: {hidden_size}")
+    print(f"[{run_name}] Batch size: {batch_size}, LR: {lr}")
     print(f"[{run_name}] Max time: {max_seconds}s")
 
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -130,6 +130,7 @@ def train(
         resume="allow" if wandb_run_id else None,
         config={
             "hidden_size": hidden_size,
+            "num_layers": num_layers,
             "batch_size": batch_size,
             "learning_rate": lr,
             "max_seconds": max_seconds,
@@ -140,9 +141,9 @@ def train(
     )
     wandb_run_id = wandb.run.id
 
-    print(f"[{run_name}] " + "-" * 70)
-    print(f"[{run_name}] {'Time':>6} | {'Samples':>12} | {'Step':>7} | {'Train Loss':>10} | {'Train Acc':>9} | {'Eval Acc':>9}")
-    print(f"[{run_name}] " + "-" * 70)
+    print(f"[{run_name}] " + "-" * 80)
+    print(f"[{run_name}] {'Time':>6} | {'Epoch':>5} | {'Samples':>12} | {'Step':>7} | {'Loss':>7} | {'Train':>6} | {'Eval':>6}")
+    print(f"[{run_name}] " + "-" * 80)
 
     start_time = time.time()
     last_eval_time = start_time
@@ -171,8 +172,16 @@ def train(
         if is_modal:
             checkpoint_volume.commit()
 
+    def infinite_batches(loader):
+        """Yield batches forever, restarting when exhausted. Tracks epoch."""
+        epoch = 0
+        while True:
+            for batch in loader:
+                yield epoch, batch
+            epoch += 1
+
     model.train()
-    train_iter = cycle(train_loader)
+    train_iter = infinite_batches(train_loader)
 
     while True:
         elapsed_this_run = time.time() - start_time
@@ -181,7 +190,7 @@ def train(
             break
 
         t0 = time.time()
-        X_batch, y_batch = next(train_iter)
+        epoch, (X_batch, y_batch) = next(train_iter)
         time_data += time.time() - t0
 
         t0 = time.time()
@@ -220,11 +229,12 @@ def train(
             pct_eval = 100 * time_eval / time_total
 
             print(
-                f"[{run_name}] {total_elapsed:>5.0f}s | {samples_seen:>12,} | {step:>7,} | {train_loss:>10.4f} | {train_acc:>8.2%} | "
-                f"{eval_metrics['eval_acc']:>8.2%} | data {pct_data:.0f}% xfer {pct_transfer:.0f}% train {pct_train:.0f}% eval {pct_eval:.0f}%"
+                f"[{run_name}] {total_elapsed:>5.0f}s | {epoch:>5} | {samples_seen:>12,} | {step:>7,} | {train_loss:>7.3f} | {train_acc:>5.1%} | {eval_metrics['eval_acc']:>5.1%} | "
+                f"data {pct_data:.0f}% xfer {pct_transfer:.0f}% train {pct_train:.0f}%"
             )
 
             wandb.log({
+                "epoch": epoch,
                 "train_loss": train_loss,
                 "train_acc": train_acc,
                 **eval_metrics,
@@ -255,24 +265,36 @@ def train(
         "run_name": run_name,
         "final_eval_acc": eval_metrics["eval_acc"],
         "num_params": num_params,
+        "num_layers": num_layers,
+        "hidden_size": hidden_size,
         "total_steps": step,
     }
 
 
-@app.function(image=image, timeout=1800)
+@app.function(image=image, timeout=14400)  # 4 hours for sweep coordination
 def sweep():
     """Run parallel training with different configurations."""
+    # Sweep over depth (num_layers) and width (hidden_size)
+    # All runs: 1 hour, lr=0.001, batch_size=256
     configs = [
-        {"hidden_size": 2048, "run_name": "precomputed"}
+        # Width sweep at depth=1
+        {"num_layers": 1, "hidden_size": 1024},
+        {"num_layers": 1, "hidden_size": 2048},
+        {"num_layers": 1, "hidden_size": 4096},
+        # Depth=2 sweep
+        {"num_layers": 2, "hidden_size": 1024},
+        {"num_layers": 2, "hidden_size": 2048},
+        {"num_layers": 2, "hidden_size": 4096},
+        # Depth=3 sweep
+        {"num_layers": 3, "hidden_size": 1024},
+        {"num_layers": 3, "hidden_size": 2048},
+        {"num_layers": 3, "hidden_size": 4096},
     ]
 
-    def make_run_name(cfg: dict) -> str:
-        parts = [f"{k[0]}{v}" for k, v in sorted(cfg.items()) if k != "run_name"]
-        return "_".join(parts) or "default"
-
+    # Add common settings
     for cfg in configs:
-        if "run_name" not in cfg:
-            cfg["run_name"] = make_run_name(cfg)
+        cfg["max_seconds"] = 3600  # 1 hour
+        cfg["run_name"] = f"mlp_size_L{cfg['num_layers']}_H{cfg['hidden_size']}"
 
     print(f"Launching {len(configs)} parallel runs:")
     for cfg in configs:
@@ -299,8 +321,10 @@ def sweep():
 
     if results:
         print(f"\nSUCCEEDED ({len(results)}/{len(configs)}):")
+        print(f"  {'Name':>15} | {'Acc':>7} | {'Layers':>6} | {'Hidden':>6} | {'Params':>10}")
+        print(f"  {'-'*15}-+-{'-'*7}-+-{'-'*6}-+-{'-'*6}-+-{'-'*10}")
         for r in sorted(results, key=lambda x: x["final_eval_acc"], reverse=True):
-            print(f"  {r['run_name']:>20}: {r['final_eval_acc']:.2%} ({r['num_params']:,} params)")
+            print(f"  {r['run_name']:>15} | {r['final_eval_acc']:>6.2%} | {r['num_layers']:>6} | {r['hidden_size']:>6} | {r['num_params']:>10,}")
 
     return results
 
