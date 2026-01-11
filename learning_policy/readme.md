@@ -4,152 +4,89 @@ Learn a policy model to directly predict next moves from chess positions.
 
 ## Files
 
-| File                 | Description                                           |
-|----------------------|-------------------------------------------------------|
-| `train_modal.py`     | Training script - runs locally or on Modal cloud      |
-| `data.py`            | Data loading with HuggingFace datasets + Arrow        |
-| `features.py`        | Piece-square feature extraction (779 features)        |
-| `mlp_model.py`       | Simple 2-layer MLP policy network                     |
-| `interface/server.py`| Web UI to visualize model predictions                 |
+| File                  | Description                                            |
+|-----------------------|--------------------------------------------------------|
+| `board_repr.py`       | Compact board format, encoders, BoardState/MoveLabel   |
+| `precompute.py` | Precompute dataset to compact numpy format             |
+| `data.py`             | Data loading for compact format                        |
+| `mlp_model.py`        | Simple MLP policy network                              |
+| `train_modal.py`      | Training script (local or Modal)                       |
+| `test_board_repr.py`  | Unit tests for board representation                    |
+| `interface/server.py` | Web UI to visualize model predictions                  |
 
-## Architecture
+## Data Format
 
-**Data Pipeline** (`data.py`):
-- Uses HuggingFace `datasets` library with Arrow memory-mapping (handles 784M samples without loading into RAM)
-- Shuffles dataset, splits into train/eval (10k eval, rest train)
-- Feature extraction happens on-the-fly per batch in `collate_fn`
-- Target: first move from Stockfish's recommended line
+**Compact storage format** (136 bytes per sample):
+```
+boards:     int8[8, 8]    - piece codes (0=empty, 1-6=white PNBRQK, -1..-6=black)
+turn:       int8          - 1=white, -1=black
+castling:   uint8[4]      - [K, Q, k, q] as 0/1
+en_passant: uint8[8, 8]   - binary layer (1 at target square)
+from_sq:    uint8         - move origin (0-63)
+to_sq:      uint8         - move destination (0-63)
+promotion:  uint8         - 0=none, 1=N, 2=B, 3=R, 4=Q
+```
 
-**Features** (`features.py`):
-- Piece-square encoding: 768 features (6 piece types × 64 squares × 2 colors)
-- Additional: turn, castling rights, material balance (11 features)
-- Total: 779 features per position
+**Data structures** (in `board_repr.py`):
+- `BoardState` - batched input features with `.to(device)`
+- `MoveLabel` - batched labels with `.to(device)` and `.to_uci()`
 
-**Model** (`mlp_model.py`):
-- 2-layer MLP: input(779) → hidden(256) → output(1968 moves)
-- ~500K parameters at default hidden size
-
-**Training** (`train_modal.py`):
-- Time-based training loop with periodic eval and checkpoints
-- Supports resume from checkpoint
-- Logs to wandb
-- Works locally (`python train_modal.py`) or on Modal (`modal run train_modal.py`)
+**Encoder modules** (run on GPU, part of model):
+- `CompactToSpatial(state)` → `(batch, 18, 8, 8)` for CNNs
+- `CompactToFlat(state)` → `(batch, 837)` for MLPs
 
 ## Usage
 
-**Train locally:**
+**Precompute dataset:**
 ```bash
-python train_modal.py --max-seconds 300 --hidden-size 256
+python precompute.py --num-samples 1M    # -> cache/compact/1M/   (~140 MB)
+python precompute.py --num-samples 50M   # -> cache/compact/50M/  (~6.8 GB)
+python precompute.py --num-samples full  # -> cache/compact/784M/ (~107 GB)
 ```
 
-**Train on Modal (cloud GPU):**
+**Run tests:**
 ```bash
-modal run train_modal.py
+python -m pytest test_board_repr.py -v
+python board_repr.py  # visualize a FEN
 ```
 
-**Visualize predictions:**
-```bash
-python interface/server.py --checkpoint checkpoints/<run_name>.pt
-# Open http://127.0.0.1:5000
-```
+## Dataset
 
-## Data
-
-Dataset: [Lichess/chess-position-evaluations](https://huggingface.co/datasets/Lichess/chess-position-evaluations)
+Source: [Lichess/chess-position-evaluations](https://huggingface.co/datasets/Lichess/chess-position-evaluations)
 - 784M positions with Stockfish evaluations
-- First run downloads and caches to `cache/` directory (~50GB Arrow format)
-- Subsequent runs load instantly via memory-mapping
+- Target: first move from Stockfish's recommended line
 
-## Resources
+| Sample count | Storage size | Precompute time |
+|--------------|--------------|-----------------|
+| 1M           | 140 MB       | ~30 sec         |
+| 50M          | 6.8 GB       | ~25 min         |
+| 784M (full)  | 107 GB       | ~7 hours        |
 
-- [Lichess standard-chess-games](https://huggingface.co/datasets/Lichess/standard-chess-games) - Full games with ELOs
-- [Mastering Chess with a Transformer Model](https://arxiv.org/abs/2409.12272) - Positional embedding variants
+**IMPORTANT NOTES ON DATASET! PAY ATTENTION TO THIS WHEN WRITING RELATED CODE**
+- The dataset is NOT uniformly distributed, There's distribution drift over time. Therefor to do accurate science it's very important that we shuffle the test/train split across whatever max data size we're working with.
+- I want to be able to do small tests locally, but larger runs will always be on Modal.
 
----
 
-# Experiments
+## Architecture
 
-## 2026-01-01: Dataset Size vs Overfitting
+**Training loop pattern:**
+```python
+for state, label in dataloader:
+    state, label = state.to(device), label.to(device)
+    logits = model(state)  # model includes encoder
+    loss = criterion(logits, label)
+```
 
-**Goal**: Determine how much training data is needed to avoid overfitting.
+**Model structure:**
+```python
+class CNNPolicy(nn.Module):
+    def __init__(self):
+        self.encoder = CompactToSpatial()  # (batch, 18, 8, 8)
+        self.backbone = nn.Sequential(...)
+        self.head = nn.Linear(...)
 
-**Setup**:
-- Model: 2-layer MLP, 256 hidden units, 705k parameters
-- Output: 1968 possible UCI moves
-- Features: Piece-square encoding (779 features)
-- Training: 5 minutes, batch size 256, lr 0.001
-- Eval set: 10k held-out positions
-
-### Results
-
-| num_train | Epochs | Train Acc | Eval Acc | Eval Top5 | Eval Loss Trend      |
-|-----------|--------|-----------|----------|-----------|----------------------|
-| 10k       | 3,904  | 99.8%     | 4.7%     | 15.8%     | 18 → 47 (explodes)   |
-| 100k      | 322    | 86.6%     | 7.8%     | 28.8%     | 6 → 18 (explodes)    |
-| 1M        | 35     | 24.1%     | 13.4%    | 46.2%     | 3.4 → 3.6 (stable)   |
-| 10M       | 3      | 15.3%     | 14.6%    | 50.6%     | 3.4 → 3.1 (improving)|
-
-### Observations
-
-1. **Overfitting threshold at ~1M samples**: Below 1M, eval loss explodes during training. At 1M+, eval metrics stay stable or improve.
-
-2. **Train/eval gap closes with more data**: At 10M samples, train and eval accuracy are nearly identical (15.3% vs 14.6%), indicating the model is learning generalizable patterns rather than memorizing.
-
-### Conclusion
-Re-architected the data loader to use the full 784M rows.
-
-## 2026-01-03: MLP Scaling Experiment and Data Corruption
-
-**Goal**: Find the optimal MLP size for chess move prediction.
-
-**Setup**:
-- Sweep over depth (1-3 layers) and width (1024-4096 hidden units)
-- 50M training samples, 10k eval
-- Training: 1 hour per run, batch size 256, lr 0.001
-- All 9 configurations run in parallel on Modal
-
-### Results
-
-| Name              | Eval Acc | Layers | Hidden | Params     |
-|-------------------|----------|--------|--------|------------|
-| mlp_size_L1_H2048 | 15.59%   | 1      | 2048   | 5,629,872  |
-| mlp_size_L1_H4096 | 15.40%   | 1      | 4096   | 11,257,776 |
-| mlp_size_L1_H1024 | 14.93%   | 1      | 1024   | 2,815,920  |
-| mlp_size_L2_H4096 | 14.59%   | 2      | 4096   | 28,039,088 |
-| mlp_size_L2_H2048 | 14.18%   | 2      | 2048   | 9,826,224  |
-| mlp_size_L2_H1024 | 14.02%   | 2      | 1024   | 3,865,520  |
-| mlp_size_L3_H2048 | 13.11%   | 3      | 2048   | 14,022,576 |
-| mlp_size_L3_H4096 | 12.75%   | 3      | 4096   | 44,820,400 |
-| mlp_size_L3_H1024 | 12.06%   | 3      | 1024   | 4,915,120  |
-
-![Training loss curves showing periodic spikes](train_loss_spikes.png)
-
-### Observations
-
-1. **Deeper models performed worse**: 1-layer MLPs consistently outperformed 2-layer and 3-layer variants, regardless of width. This is counterintuitive - more capacity should help.
-
-2. **Suspicious loss spikes**: All models showed periodic downward spikes in training loss, followed by loss going *higher* than before. These correlated with drops in eval accuracy.
-
-3. **Spikes at identical steps**: When graphing by step instead of wall-clock time, all 9 runs spiked at the exact same training step. This ruled out optimizer dynamics and pointed to corrupted data.
-
-### Root Cause: Corrupted Training Data
-
-The precompute pipeline used memory-mapped numpy files (`np.lib.format.open_memmap`) which pre-allocate with zeros. During an earlier run, one worker stalled mid-write. The resume logic only checked file length, not content - so the partially-written shard (real data followed by thousands of zero rows) was marked as complete.
-
-Result: Contiguous blocks of all-zero feature vectors in the training data. The model could easily "learn" these (predict most common move for zero input), causing:
-- Sharp drop in training loss on zero batches
-- Overfitting that damaged generalization
-- Higher loss on subsequent real data
-
-### Fix
-
-1. Removed resume logic from `precompute.py` - fresh start every time
-2. Added validation: check that last and middle rows of each shard are non-zero before concatenating
-3. Re-ran precomputation from scratch
-
-### Lessons
-
-- Memory-mapped files with pre-allocation are dangerous for resumable pipelines
-- Validate data content, not just file size/existence
-- When all parallel runs show identical anomalies, the bug is in shared data, not the model
-
+    def forward(self, state: BoardState):
+        x = self.encoder(state)
+        x = self.backbone(x)
+        return self.head(x.flatten(1))
+```

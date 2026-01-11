@@ -2,8 +2,8 @@
 Chess policy training - runs locally or on Modal.
 
 Usage:
-    modal run train_modal.py
-    python train_modal.py --max-seconds 300
+    modal run train_modal.py::train --num-samples 50M --max-seconds 3600
+    python train_modal.py --num-samples 1M --max-seconds 300
 """
 import modal
 
@@ -11,9 +11,9 @@ app = modal.App("chess-policy")
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .pip_install("torch", "wandb", "numpy", "python-chess")
+    .pip_install("torch", "wandb", "numpy")
     .add_local_file("data.py", "/root/data.py")
-    .add_local_file("features.py", "/root/features.py")
+    .add_local_file("board_repr.py", "/root/board_repr.py")
     .add_local_file("mlp_model.py", "/root/mlp_model.py")
 )
 
@@ -37,7 +37,7 @@ def train(
     eval_interval_seconds: int = 60,
     run_name: str = None,
     checkpoint_dir: str = "checkpoints",
-    num_workers: int = 0,
+    num_samples: str = "50M",
 ):
     import sys
     sys.path.insert(0, "/root")
@@ -51,8 +51,7 @@ def train(
     import wandb
 
     from data import get_dataloaders
-    from mlp_model import SimplePolicyMLP
-    from features import TOTAL_FEATURES
+    from mlp_model import PolicyMLP, NUM_MOVES
 
     is_modal = bool(os.environ.get("MODAL_TASK_ID"))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -68,21 +67,23 @@ def train(
     print("=" * 60)
 
     # Load data from precomputed features
-    cache_dir = "/root/cache" if is_modal else None
-    train_loader, eval_loader, vocab = get_dataloaders(batch_size, cache_dir=cache_dir, num_workers=num_workers)
-    num_moves = len(vocab)
+    train_loader, eval_loader = get_dataloaders(batch_size, num_samples=num_samples)
     total_samples = train_loader.num_samples
     print(f"[{run_name}] Training on {total_samples:,} samples")
 
     # Create model
-    model = SimplePolicyMLP(
-        input_size=TOTAL_FEATURES,
-        num_moves=num_moves,
+    model = PolicyMLP(
         hidden_size=hidden_size,
         num_layers=num_layers,
     ).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    def labels_to_indices(label):
+        """Convert MoveLabel to target indices for cross-entropy."""
+        return (label.from_sq.long() * 64 * 5 +
+                label.to_sq.long() * 5 +
+                label.promotion.long())
 
     @torch.no_grad()
     def estimate_eval_loss():
@@ -90,12 +91,13 @@ def train(
         losses = []
         correct = 0
         total = 0
-        for X_batch, y_batch in eval_loader:
-            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
-            logits = model(X_batch)
-            losses.append(criterion(logits, y_batch).item())
-            correct += (logits.argmax(dim=1) == y_batch).sum().item()
-            total += len(y_batch)
+        for state, label in eval_loader:
+            state, label = state.to(device), label.to(device)
+            logits = model(state)
+            target = labels_to_indices(label)
+            losses.append(criterion(logits, target).item())
+            correct += (logits.argmax(dim=1) == target).sum().item()
+            total += len(target)
         model.train()
         return {"eval_loss": sum(losses) / len(losses), "eval_acc": correct / total}
 
@@ -103,6 +105,7 @@ def train(
 
     print(f"[{run_name}] Model: {num_params:,} parameters")
     print(f"[{run_name}] Layers: {num_layers}, Hidden: {hidden_size}")
+    print(f"[{run_name}] Output classes: {NUM_MOVES}")
     print(f"[{run_name}] Batch size: {batch_size}, LR: {lr}")
     print(f"[{run_name}] Max time: {max_seconds}s")
 
@@ -135,7 +138,7 @@ def train(
             "learning_rate": lr,
             "max_seconds": max_seconds,
             "num_params": num_params,
-            "num_moves": num_moves,
+            "num_moves": NUM_MOVES,
             "total_samples": total_samples,
         },
     )
@@ -190,27 +193,28 @@ def train(
             break
 
         t0 = time.time()
-        epoch, (X_batch, y_batch) = next(train_iter)
+        epoch, (state, label) = next(train_iter)
         time_data += time.time() - t0
 
         t0 = time.time()
-        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+        state, label = state.to(device), label.to(device)
         time_transfer += time.time() - t0
 
         t0 = time.time()
         optimizer.zero_grad()
-        logits = model(X_batch)
-        loss = criterion(logits, y_batch)
+        logits = model(state)
+        target = labels_to_indices(label)
+        loss = criterion(logits, target)
         loss.backward()
         optimizer.step()
         time_train += time.time() - t0
 
         step += 1
-        samples_seen += len(X_batch)
+        samples_seen += len(target)
         train_loss_sum += loss.item()
         with torch.no_grad():
-            train_correct += (logits.argmax(dim=1) == y_batch).sum().item()
-        train_total += len(y_batch)
+            train_correct += (logits.argmax(dim=1) == target).sum().item()
+        train_total += len(target)
 
         if time.time() - last_eval_time >= eval_interval_seconds:
             last_eval_time = time.time()
@@ -327,12 +331,6 @@ def sweep():
             print(f"  {r['run_name']:>15} | {r['final_eval_acc']:>6.2%} | {r['num_layers']:>6} | {r['hidden_size']:>6} | {r['num_params']:>10,}")
 
     return results
-
-
-@app.local_entrypoint()
-def main():
-    result = train.remote()
-    print(f"Result: {result}")
 
 
 if __name__ == "__main__":

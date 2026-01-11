@@ -12,3 +12,4 @@ __pycache__
 *.png
 *.csv
 *.parquet
+learning_board_value/cache/
