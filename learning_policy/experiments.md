@@ -82,7 +82,12 @@ NOTE: Reran with the fix - spikes were gone, loss curve was the same.
 
 ## 2026-01-11: Training Pipeline Optimization
 
-**Goal**: Optimize training throughput while maintaining ~15% eval accuracy.
+**Goal**: Have a flexible data representation so that I can do experiments on features without needing to rerun pre-compute. 
+
+Iterations:
+1. **Compact + 20k output**: Store boards as int8 piece codes (64 bytes/sample), expand to 12 binary planes on GPU. Output all 64×64×5 = 20,480 possible moves.
+2. **Compact + vocab**: Same storage, but build vocab of ~1,968 actually-occurring moves. Reduces output layer from 21M to 2M params.
+3. **Planes**: Precompute boards as 13 binary uint8 planes (12 pieces + en_passant). GPU work reduces to single `.float()` cast.
 
 **Setup**: L1 H1024, 50M samples.
 
@@ -91,6 +96,10 @@ NOTE: Reran with the fix - spikes were gone, loss curve was the same.
 | Compact + 20k output    | 14,700/sec | 1.0x    | Output layer (21M params)| Build vocab of ~1,968 moves       |
 | Compact + vocab         | 29,400/sec | 2.0x    | GPU expansion (fwd 43%)  | Precompute binary planes          |
 | Pre-expanded planes     | 83,400/sec | 5.7x    | Backward pass (36%)      | —                                 |
+
+![img](img/throughput_eval.png)
+
+![img](img/throughput_samples.png)
 
 **Storage tradeoff**: Planes format is 42 GB vs 6.8 GB for compact (6x larger), but 2.8x faster than compact+vocab.
 
