@@ -80,44 +80,18 @@ Result: Contiguous blocks of all-zero feature vectors in the training data. The 
 
 NOTE: Reran with the fix - spikes were gone, loss curve was the same.
 
-## 2026-01-11: Compact Data Format Validation
+## 2026-01-11: Training Pipeline Optimization
 
-**Goal**: Validate new compact data pipeline against previous results.
+**Goal**: Optimize training throughput while maintaining ~15% eval accuracy.
 
-**Changes from previous experiments**:
-- **Output format**: 20,480 classes (64×64×5 for from/to/promo) vs ~1,968 UCI vocab
-- **Input features**: 837 features vs 779 (added 64-dim en passant layer)
-- **Data pipeline**: Compact format with GPU-side expansion, proper shuffle across full dataset
+**Setup**: L1 H1024, 50M samples.
 
-**Baseline comparison**: L1 H1024, 30 min, 50M samples
-- Old result: 14.93% eval acc
-- Expected: Similar accuracy (output space is larger but moves are the same)
+| Iteration               | Throughput | Speedup | Bottleneck               | Fix                               |
+|-------------------------|------------|---------|--------------------------|-----------------------------------|
+| Compact + 20k output    | 14,700/sec | 1.0x    | Output layer (21M params)| Build vocab of ~1,968 moves       |
+| Compact + vocab         | 29,400/sec | 2.0x    | GPU expansion (fwd 43%)  | Precompute binary planes          |
+| Pre-expanded planes     | 83,400/sec | 5.7x    | Backward pass (36%)      | —                                 |
 
-**Run**: `mlp_size_L1_H1024_compact`
+**Storage tradeoff**: Planes format is 42 GB vs 6.8 GB for compact (6x larger), but 2.8x faster than compact+vocab.
 
-### Results (20,480 output vocab - stopped early)
-
-| Time | Samples | Train Acc | Eval Acc | Notes |
-|------|---------|-----------|----------|-------|
-| 720s | 10.6M   | 13.3%     | 14.1%    | 5x slower than old format due to 20k output layer |
-
-**Issue found**: Output layer has 20,480 classes (64×64×5) vs old ~1,968 vocab. This 10x increase in output size caused:
-- 7.8x more parameters (21.8M vs 2.8M for L1 H1024)
-- ~5x slower training throughput
-
-**Fix**: Build vocab from training data to reduce output space back to ~1,968.
-
-### Results (with vocab - pending)
-[mlp_size_L1_H1024_compact_vocab]   720s |     0 |   21,140,224 |  82,579 |   3.123 | 14.3% | 14.8% | data 2% xfer 3% train 95%
-
-2x faster than before, but still ~3x slower than pre-computing everything.
-
-### Now with saving data in the "layer" format
-
-[mlp_size_L1_H1024_layers] --------------------------------------------------------------------------------
-[mlp_size_L1_H1024_layers]   Time | Epoch |      Samples |    Step |    Loss |  Train |   Eval
-[mlp_size_L1_H1024_layers] --------------------------------------------------------------------------------
-[mlp_size_L1_H1024_layers]    60s |     0 |    4,837,632 |  18,897 |   3.511 | 11.8% | 12.2% | data 8% xfer 12% fwd 27% bwd 36% opt 18%
-[mlp_size_L1_H1024_layers]   dataloader: [mmap 12% tensor 14% vocab 75%]
-[mlp_size_L1_H1024_layers]   120s |     0 |   10,003,456 |  39,076 |   3.258 | 13.1% | 13.2% | data 7% xfer 14% fwd 25% bwd 36% opt 18%
-[mlp_size_L1_H1024_layers]   dataloader: [mmap 12% tensor 14% vocab 73%]
+**Final state**: Backward pass (actual gradient compute) is now the dominant cost. One epoch over 50M samples takes ~10 minutes.
