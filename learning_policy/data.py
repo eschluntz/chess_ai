@@ -1,5 +1,12 @@
 """
-Data loading from precomputed compact numpy files.
+Data loading from precomputed planes numpy files.
+
+Uses consolidated 13-plane format for fast training:
+    planes.npy: (N, 13, 8, 8) uint8 - 12 piece planes + en_passant
+    meta.npy:   (N, 5) int8         - [turn, K, Q, k, q]
+    moves.npy:  (N, 3) uint8        - [from_sq, to_sq, promotion]
+
+For the legacy compact (int8 board) format, see data_compact.py.
 """
 
 import time
@@ -9,33 +16,28 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from board_repr import BoardState
-
 # Suppress warning about non-writable tensors from mmap
-# Safe because we only read, then copy to GPU
 warnings.filterwarnings('ignore', message='.*not writable.*')
 
-CACHE_DIR = Path(__file__).parent / "cache" / "compact"
+CACHE_DIR = Path(__file__).parent / "cache" / "planes"
 
 
 class MoveVocab:
     """Bidirectional mapping between (from_sq, to_sq, promotion) and vocab indices."""
 
     def __init__(self, vocab_path: Path):
-        # vocab.npy is (num_moves, 3) array of [from_sq, to_sq, promotion]
         self.moves = np.load(vocab_path)  # (num_moves, 3)
         self.num_moves = len(self.moves)
 
         # Build tensor lookup table: packed_key -> index
-        # Pack: from*320 + to*5 + promo (max = 63*320 + 63*5 + 4 = 20479)
         self._lookup = torch.zeros(64 * 320, dtype=torch.long)
         for idx, (f, t, p) in enumerate(self.moves):
             key = int(f) * 320 + int(t) * 5 + int(p)
             self._lookup[key] = idx
 
-    def to_indices(self, from_sq: torch.Tensor, to_sq: torch.Tensor, promotion: torch.Tensor) -> torch.Tensor:
-        """Convert move components to vocab indices. Vectorized tensor operation."""
-        keys = from_sq.long() * 320 + to_sq.long() * 5 + promotion.long()
+    def to_indices(self, moves: torch.Tensor) -> torch.Tensor:
+        """Convert (batch, 3) moves to vocab indices. Vectorized tensor operation."""
+        keys = moves[:, 0].long() * 320 + moves[:, 1].long() * 5 + moves[:, 2].long()
         return self._lookup[keys]
 
     def to_uci(self, idx: int) -> str:
@@ -50,30 +52,22 @@ class MoveVocab:
         return uci
 
 
-class CompactDataset:
-    """Iterator that yields (BoardState, target_indices) batches from memory-mapped numpy arrays.
-
-    Reads contiguous chunks for efficiency. No shuffling (data is pre-shuffled).
-    """
+class PlanesDataset:
+    """Iterator that yields (planes, meta, target) batches from memory-mapped numpy arrays."""
 
     def __init__(self, data_dir: Path, prefix: str, batch_size: int, vocab: MoveVocab):
         self.batch_size = batch_size
         self.vocab = vocab
 
-        # Memory-map all arrays
-        self.boards = np.load(data_dir / f"{prefix}_boards.npy", mmap_mode='r')
-        self.turn = np.load(data_dir / f"{prefix}_turn.npy", mmap_mode='r')
-        self.castling = np.load(data_dir / f"{prefix}_castling.npy", mmap_mode='r')
-        self.en_passant = np.load(data_dir / f"{prefix}_en_passant.npy", mmap_mode='r')
-        self.from_sq = np.load(data_dir / f"{prefix}_from_sq.npy", mmap_mode='r')
-        self.to_sq = np.load(data_dir / f"{prefix}_to_sq.npy", mmap_mode='r')
-        self.promotion = np.load(data_dir / f"{prefix}_promotion.npy", mmap_mode='r')
+        # Memory-map consolidated arrays
+        self.planes = np.load(data_dir / f"{prefix}_planes.npy", mmap_mode='r')
+        self.meta = np.load(data_dir / f"{prefix}_meta.npy", mmap_mode='r')
+        self.moves = np.load(data_dir / f"{prefix}_moves.npy", mmap_mode='r')
 
-        self.num_samples = len(self.boards)
+        self.num_samples = len(self.planes)
         self.num_batches = self.num_samples // batch_size
 
     def __iter__(self):
-        # Timing accumulators (reset each epoch)
         self.time_mmap = 0.0
         self.time_tensor = 0.0
         self.time_vocab = 0.0
@@ -82,58 +76,45 @@ class CompactDataset:
             start = i * self.batch_size
             end = start + self.batch_size
 
-            # Time mmap reads
             t0 = time.perf_counter()
-            boards = self.boards[start:end]
-            turn = self.turn[start:end]
-            castling = self.castling[start:end]
-            en_passant = self.en_passant[start:end]
-            from_sq = self.from_sq[start:end]
-            to_sq = self.to_sq[start:end]
-            promotion = self.promotion[start:end]
+            planes = self.planes[start:end]
+            meta = self.meta[start:end]
+            moves = self.moves[start:end]
             self.time_mmap += time.perf_counter() - t0
 
-            # Time tensor creation
             t0 = time.perf_counter()
-            state = BoardState(
-                boards=torch.as_tensor(boards),
-                turn=torch.as_tensor(turn),
-                castling=torch.as_tensor(castling),
-                en_passant=torch.as_tensor(en_passant),
-            )
-            from_t = torch.as_tensor(from_sq)
-            to_t = torch.as_tensor(to_sq)
-            promo_t = torch.as_tensor(promotion)
+            planes_t = torch.as_tensor(planes)
+            meta_t = torch.as_tensor(meta)
+            moves_t = torch.as_tensor(moves)
             self.time_tensor += time.perf_counter() - t0
 
-            # Time vocab lookup
             t0 = time.perf_counter()
-            target = self.vocab.to_indices(from_t, to_t, promo_t)
+            target = self.vocab.to_indices(moves_t)
             self.time_vocab += time.perf_counter() - t0
 
-            yield state, target
+            yield planes_t, meta_t, target
 
     def __len__(self):
         return self.num_batches
 
 
 def get_dataloaders(batch_size: int, num_samples: str = "50M"):
-    """Load precomputed compact features from numpy files.
-
-    Args:
-        batch_size: Number of samples per batch
-        num_samples: Dataset size folder name (e.g., "1M", "50M", "full")
+    """Load precomputed planes features from numpy files.
 
     Returns:
-        train_loader: Iterator yielding (BoardState, target_indices) batches
-        eval_loader: Iterator yielding (BoardState, target_indices) batches
+        train_loader: Iterator yielding (planes, meta, target) batches
+        eval_loader: Iterator yielding (planes, meta, target) batches
         vocab: MoveVocab for decoding predictions
     """
     data_dir = CACHE_DIR / num_samples
-    vocab = MoveVocab(CACHE_DIR / "vocab.npy")
 
-    train_loader = CompactDataset(data_dir, "train", batch_size, vocab)
-    eval_loader = CompactDataset(data_dir, "eval", batch_size, vocab)
+    vocab_path = CACHE_DIR / "vocab.npy"
+    if not vocab_path.exists():
+        vocab_path = Path(__file__).parent / "cache" / "compact" / "vocab.npy"
+    vocab = MoveVocab(vocab_path)
+
+    train_loader = PlanesDataset(data_dir, "train", batch_size, vocab)
+    eval_loader = PlanesDataset(data_dir, "eval", batch_size, vocab)
 
     print(f"Train: {train_loader.num_samples:,} samples ({train_loader.num_batches:,} batches)")
     print(f"Eval: {eval_loader.num_samples:,} samples ({eval_loader.num_batches:,} batches)")

@@ -2,15 +2,16 @@
 MLP policy network model.
 """
 
+import torch
 import torch.nn as nn
 
-from board_repr import BoardState, CompactToFlat
+from board_repr import PlanesToFlat
 
 
 class PolicyMLP(nn.Module):
     """MLP for move prediction with configurable depth and width.
 
-    Takes BoardState as input, encodes to flat features internally.
+    Takes (planes, meta) tensors as input, flattens to features internally.
     Output is (batch, num_moves) logits for vocab indices.
     """
 
@@ -22,7 +23,7 @@ class PolicyMLP(nn.Module):
     ):
         super().__init__()
 
-        self.encoder = CompactToFlat()  # -> (batch, 837)
+        self.encoder = PlanesToFlat()  # -> (batch, 837)
         input_size = 837
 
         layers = []
@@ -41,6 +42,6 @@ class PolicyMLP(nn.Module):
 
         self.net = nn.Sequential(*layers)
 
-    def forward(self, state: BoardState):
-        x = self.encoder(state)
+    def forward(self, planes: torch.Tensor, meta: torch.Tensor) -> torch.Tensor:
+        x = self.encoder(planes, meta)
         return self.net(x)

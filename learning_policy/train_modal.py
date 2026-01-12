@@ -87,9 +87,9 @@ def train(
         losses = []
         correct = 0
         total = 0
-        for state, target in eval_loader:
-            state, target = state.to(device), target.to(device)
-            logits = model(state)
+        for planes, meta, target in eval_loader:
+            planes, meta, target = planes.to(device), meta.to(device), target.to(device)
+            logits = model(planes, meta)
             losses.append(criterion(logits, target).item())
             correct += (logits.argmax(dim=1) == target).sum().item()
             total += len(target)
@@ -190,17 +190,17 @@ def train(
             break
 
         t0 = time.time()
-        epoch, (state, target) = next(train_iter)
+        epoch, (planes, meta, target) = next(train_iter)
         time_data += time.time() - t0
 
         t0 = time.time()
-        state, target = state.to(device), target.to(device)
+        planes, meta, target = planes.to(device), meta.to(device), target.to(device)
         time_transfer += time.time() - t0
 
         optimizer.zero_grad()
 
         t0 = time.time()
-        logits = model(state)
+        logits = model(planes, meta)
         loss = criterion(logits, target)
         if torch.cuda.is_available():
             torch.cuda.synchronize()

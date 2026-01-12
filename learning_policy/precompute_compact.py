@@ -1,20 +1,20 @@
 """
-Precompute 13-plane format locally or on Modal.
+Precompute compact (int8 board) format - LEGACY.
 
-This format pre-expands boards to 13 binary planes (12 pieces + en_passant)
-during precompute, eliminating GPU-side expansion during training.
+This format stores boards as (N, 8, 8) int8 arrays where each value encodes the
+piece type. It requires GPU-side expansion to 12 binary planes during training,
+which adds ~40% overhead to the forward pass.
 
-Storage: 3 files per split
-    planes.npy: (N, 13, 8, 8) uint8 - piece planes + en_passant
-    meta.npy:   (N, 5) int8         - [turn, K, Q, k, q]
-    moves.npy:  (N, 3) uint8        - [from_sq, to_sq, promotion]
+The planes format (precompute.py) pre-expands to 12 planes during precompute,
+trading disk space for faster training. Use that format for new experiments.
 
-For the legacy compact (int8 board) format, see precompute_compact.py.
+This file is kept for backwards compatibility with existing compact datasets.
 
 Usage:
-    python precompute.py                                       # 1M locally (default)
-    python precompute.py --num-samples 50M                     # 50M locally
-    modal run --detach precompute.py::precompute_modal         # 50M on Modal
+    python precompute_compact.py                                    # 1M locally (default)
+    python precompute_compact.py --num-samples 50M                  # 50M locally
+    modal run --detach precompute_compact.py::precompute_modal      # 50M on Modal
+    modal run --detach precompute_compact.py::precompute_modal_full # 784M on Modal (high memory)
 """
 
 import time
@@ -24,7 +24,7 @@ import modal
 import numpy as np
 from tqdm import tqdm
 
-app = modal.App("chess-precompute")
+app = modal.App("chess-precompute-compact")
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -34,7 +34,7 @@ image = (
 
 data_volume = modal.Volume.from_name("chess-policy-data", create_if_missing=True)
 
-STREAMING_THRESHOLD = 5_000_000
+STREAMING_THRESHOLD = 50_000_000
 
 
 def format_count(n: int) -> str:
@@ -59,10 +59,11 @@ def parse_num_samples(ns: str) -> int | str:
 
 
 def _precompute(num_samples: str | int, output_dir: Path, eval_size: int):
-    """Core precompute logic for consolidated 13-plane format."""
+    """Core precompute logic for compact format."""
     from datasets import load_dataset
 
-    from board_repr import fen_to_planes, uci_to_compact
+    from board_repr import uci_to_compact
+    from board_repr_compact import fen_to_compact
 
     parsed = parse_num_samples(num_samples) if isinstance(num_samples, str) else num_samples
     use_full = parsed == "full"
@@ -95,13 +96,17 @@ def _precompute(num_samples: str | int, output_dir: Path, eval_size: int):
     output_dir = output_dir / folder_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Precomputing {num_samples:,} samples to {output_dir}")
+    print(f"Precomputing {num_samples:,} samples (compact format) to {output_dir}")
     print(f"  Train: {num_samples - eval_size:,}, Eval: {eval_size:,}")
 
-    # Pre-allocate consolidated arrays
-    planes = np.zeros((num_samples, 13, 8, 8), dtype=np.uint8)
-    meta = np.zeros((num_samples, 5), dtype=np.int8)
-    moves = np.zeros((num_samples, 3), dtype=np.uint8)
+    # Pre-allocate arrays
+    boards = np.zeros((num_samples, 8, 8), dtype=np.int8)
+    turn = np.zeros(num_samples, dtype=np.int8)
+    castling = np.zeros((num_samples, 4), dtype=np.uint8)
+    en_passant = np.zeros((num_samples, 8, 8), dtype=np.uint8)
+    from_sq = np.zeros(num_samples, dtype=np.uint8)
+    to_sq = np.zeros(num_samples, dtype=np.uint8)
+    promotion = np.zeros(num_samples, dtype=np.uint8)
 
     print("Processing samples...")
     t0 = time.perf_counter()
@@ -110,13 +115,17 @@ def _precompute(num_samples: str | int, output_dir: Path, eval_size: int):
         if i >= num_samples:
             break
 
-        p, m = fen_to_planes(example["fen"])
-        planes[i] = p
-        meta[i] = m
+        b, t, c, ep = fen_to_compact(example["fen"])
+        boards[i] = b
+        turn[i] = t
+        castling[i] = c
+        en_passant[i] = ep
 
         uci = example["line"].split()[0]
-        f, s, pr = uci_to_compact(uci)
-        moves[i] = [f, s, pr]
+        f, s, p = uci_to_compact(uci)
+        from_sq[i] = f
+        to_sq[i] = s
+        promotion[i] = p
 
     elapsed = time.perf_counter() - t0
     rate = num_samples / elapsed
@@ -139,22 +148,30 @@ def _precompute(num_samples: str | int, output_dir: Path, eval_size: int):
         del out
 
     print("Saving eval arrays...")
-    save_indexed(planes, eval_idx, output_dir / "eval_planes.npy")
-    save_indexed(meta, eval_idx, output_dir / "eval_meta.npy")
-    save_indexed(moves, eval_idx, output_dir / "eval_moves.npy")
+    save_indexed(boards, eval_idx, output_dir / "eval_boards.npy")
+    save_indexed(turn, eval_idx, output_dir / "eval_turn.npy")
+    save_indexed(castling, eval_idx, output_dir / "eval_castling.npy")
+    save_indexed(en_passant, eval_idx, output_dir / "eval_en_passant.npy")
+    save_indexed(from_sq, eval_idx, output_dir / "eval_from_sq.npy")
+    save_indexed(to_sq, eval_idx, output_dir / "eval_to_sq.npy")
+    save_indexed(promotion, eval_idx, output_dir / "eval_promotion.npy")
 
     print("Saving train arrays...")
-    save_indexed(planes, train_idx, output_dir / "train_planes.npy")
-    save_indexed(meta, train_idx, output_dir / "train_meta.npy")
-    save_indexed(moves, train_idx, output_dir / "train_moves.npy")
+    save_indexed(boards, train_idx, output_dir / "train_boards.npy")
+    save_indexed(turn, train_idx, output_dir / "train_turn.npy")
+    save_indexed(castling, train_idx, output_dir / "train_castling.npy")
+    save_indexed(en_passant, train_idx, output_dir / "train_en_passant.npy")
+    save_indexed(from_sq, train_idx, output_dir / "train_from_sq.npy")
+    save_indexed(to_sq, train_idx, output_dir / "train_to_sq.npy")
+    save_indexed(promotion, train_idx, output_dir / "train_promotion.npy")
 
     total_bytes = sum(f.stat().st_size for f in output_dir.glob("*.npy"))
     print(f"Total size: {total_bytes / 1e9:.2f} GB")
     print("Done!")
 
 
-def precompute_local(num_samples: str = "1M", eval_size: int = 10_000, output_dir: str = "cache/planes"):
-    """Run planes precompute locally."""
+def precompute_local(num_samples: str = "1M", eval_size: int = 10_000, output_dir: str = "cache/compact"):
+    """Run compact precompute locally."""
     _precompute(num_samples, Path(output_dir), eval_size)
 
 
@@ -162,14 +179,28 @@ def precompute_local(num_samples: str = "1M", eval_size: int = 10_000, output_di
     image=image,
     volumes={"/root/cache": data_volume},
     timeout=86400,
-    memory=64000,
 )
 def precompute_modal(num_samples: str = "50M", eval_size: int = 10_000):
-    """Run planes precompute on Modal - 64GB memory for 50M samples."""
+    """Run compact precompute on Modal - standard memory for datasets up to ~50M."""
     import sys
 
     sys.path.insert(0, "/root")
-    _precompute(num_samples, Path("/root/cache/planes"), eval_size)
+    _precompute(num_samples, Path("/root/cache/compact"), eval_size)
+    data_volume.commit()
+
+
+@app.function(
+    image=image,
+    volumes={"/root/cache": data_volume},
+    timeout=86400,
+    memory=128000,
+)
+def precompute_modal_full(num_samples: str = "full", eval_size: int = 10_000):
+    """Run compact precompute on Modal - high memory for full dataset."""
+    import sys
+
+    sys.path.insert(0, "/root")
+    _precompute(num_samples, Path("/root/cache/compact"), eval_size)
     data_volume.commit()
 
 

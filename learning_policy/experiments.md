@@ -112,3 +112,12 @@ NOTE: Reran with the fix - spikes were gone, loss curve was the same.
 
 2x faster than before, but still ~3x slower than pre-computing everything.
 
+### Now with saving data in the "layer" format
+
+[mlp_size_L1_H1024_layers] --------------------------------------------------------------------------------
+[mlp_size_L1_H1024_layers]   Time | Epoch |      Samples |    Step |    Loss |  Train |   Eval
+[mlp_size_L1_H1024_layers] --------------------------------------------------------------------------------
+[mlp_size_L1_H1024_layers]    60s |     0 |    4,837,632 |  18,897 |   3.511 | 11.8% | 12.2% | data 8% xfer 12% fwd 27% bwd 36% opt 18%
+[mlp_size_L1_H1024_layers]   dataloader: [mmap 12% tensor 14% vocab 75%]
+[mlp_size_L1_H1024_layers]   120s |     0 |   10,003,456 |  39,076 |   3.258 | 13.1% | 13.2% | data 7% xfer 14% fwd 25% bwd 36% opt 18%
+[mlp_size_L1_H1024_layers]   dataloader: [mmap 12% tensor 14% vocab 73%]

@@ -7,8 +7,8 @@ This is an optimization layer - the canonical representation remains
 from 20,480 (64*64*5) to ~1,968 actually-occurring moves.
 
 Usage:
-    python build_vocab.py                           # uses cache/compact/50M
-    python build_vocab.py cache/compact/1M          # specify data dir
+    python build_vocab.py                           # uses cache/planes/50M
+    python build_vocab.py cache/planes/1M           # specify data dir
     python build_vocab.py dir1 dir2                 # combine multiple dirs
 """
 
@@ -16,11 +16,11 @@ from pathlib import Path
 
 import numpy as np
 
-CACHE_DIR = Path(__file__).parent / "cache" / "compact"
+CACHE_DIR = Path(__file__).parent / "cache" / "planes"
 
 
 def build_vocab(data_dirs: list[str] = None):
-    """Build vocab from one or more data directories. Saves to cache/compact/vocab.npy."""
+    """Build vocab from one or more data directories. Saves to cache/planes/vocab.npy."""
     if not data_dirs:
         data_dirs = [str(CACHE_DIR / "50M")]
 
@@ -31,11 +31,7 @@ def build_vocab(data_dirs: list[str] = None):
         print(f"Loading moves from {data_dir}...")
 
         for prefix in ["train", "eval"]:
-            from_sq = np.load(data_dir / f"{prefix}_from_sq.npy", mmap_mode='r')
-            to_sq = np.load(data_dir / f"{prefix}_to_sq.npy", mmap_mode='r')
-            promotion = np.load(data_dir / f"{prefix}_promotion.npy", mmap_mode='r')
-
-            moves = np.stack([from_sq, to_sq, promotion], axis=1)
+            moves = np.load(data_dir / f"{prefix}_moves.npy", mmap_mode='r')
             all_moves.append(moves)
             print(f"  {prefix}: {len(moves):,} samples")
 
