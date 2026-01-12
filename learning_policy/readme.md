@@ -41,7 +41,7 @@ promotion:  uint8         - 0=none, 1=N, 2=B, 3=R, 4=Q
 ```bash
 python precompute.py --num-samples 1M    # -> cache/compact/1M/   (~140 MB)
 python precompute.py --num-samples 50M   # -> cache/compact/50M/  (~6.8 GB)
-python precompute.py --num-samples full  # -> cache/compact/784M/ (~107 GB)
+python precompute.py --num-samples full  # -> cache/compact/full/ (~115 GB)
 ```
 
 **Run tests:**
@@ -53,14 +53,14 @@ python board_repr.py  # visualize a FEN
 ## Dataset
 
 Source: [Lichess/chess-position-evaluations](https://huggingface.co/datasets/Lichess/chess-position-evaluations)
-- 784M positions with Stockfish evaluations
+- 844M positions with Stockfish evaluations
 - Target: first move from Stockfish's recommended line
 
 | Sample count | Storage size | Precompute time |
 |--------------|--------------|-----------------|
 | 1M           | 140 MB       | ~30 sec         |
 | 50M          | 6.8 GB       | ~25 min         |
-| 784M (full)  | 107 GB       | ~7 hours        |
+| 844M (full)  | 115 GB       | ~8 hours        |
 
 **IMPORTANT NOTES ON DATASET! PAY ATTENTION TO THIS WHEN WRITING RELATED CODE**
 - The dataset is NOT uniformly distributed, There's distribution drift over time. Therefor to do accurate science it's very important that we shuffle the test/train split across whatever max data size we're working with.

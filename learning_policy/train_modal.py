@@ -2,7 +2,7 @@
 Chess policy training - runs locally or on Modal.
 
 Usage:
-    modal run train_modal.py::train --num-samples 50M --max-seconds 3600
+    modal run --detach train_modal.py::train --num-samples 50M --max-seconds 3600
     python train_modal.py --num-samples 1M --max-seconds 300
 """
 import modal
@@ -51,7 +51,7 @@ def train(
     import wandb
 
     from data import get_dataloaders
-    from mlp_model import PolicyMLP, NUM_MOVES
+    from mlp_model import PolicyMLP
 
     is_modal = bool(os.environ.get("MODAL_TASK_ID"))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -67,23 +67,19 @@ def train(
     print("=" * 60)
 
     # Load data from precomputed features
-    train_loader, eval_loader = get_dataloaders(batch_size, num_samples=num_samples)
+    train_loader, eval_loader, vocab = get_dataloaders(batch_size, num_samples=num_samples)
     total_samples = train_loader.num_samples
+    num_moves = vocab.num_moves
     print(f"[{run_name}] Training on {total_samples:,} samples")
 
     # Create model
     model = PolicyMLP(
+        num_moves=num_moves,
         hidden_size=hidden_size,
         num_layers=num_layers,
     ).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
-
-    def labels_to_indices(label):
-        """Convert MoveLabel to target indices for cross-entropy."""
-        return (label.from_sq.long() * 64 * 5 +
-                label.to_sq.long() * 5 +
-                label.promotion.long())
 
     @torch.no_grad()
     def estimate_eval_loss():
@@ -91,10 +87,9 @@ def train(
         losses = []
         correct = 0
         total = 0
-        for state, label in eval_loader:
-            state, label = state.to(device), label.to(device)
+        for state, target in eval_loader:
+            state, target = state.to(device), target.to(device)
             logits = model(state)
-            target = labels_to_indices(label)
             losses.append(criterion(logits, target).item())
             correct += (logits.argmax(dim=1) == target).sum().item()
             total += len(target)
@@ -105,7 +100,7 @@ def train(
 
     print(f"[{run_name}] Model: {num_params:,} parameters")
     print(f"[{run_name}] Layers: {num_layers}, Hidden: {hidden_size}")
-    print(f"[{run_name}] Output classes: {NUM_MOVES}")
+    print(f"[{run_name}] Output classes: {num_moves}")
     print(f"[{run_name}] Batch size: {batch_size}, LR: {lr}")
     print(f"[{run_name}] Max time: {max_seconds}s")
 
@@ -138,7 +133,7 @@ def train(
             "learning_rate": lr,
             "max_seconds": max_seconds,
             "num_params": num_params,
-            "num_moves": NUM_MOVES,
+            "num_moves": num_moves,
             "total_samples": total_samples,
         },
     )
@@ -159,7 +154,9 @@ def train(
     # Timing accumulators
     time_data = 0.0
     time_transfer = 0.0
-    time_train = 0.0
+    time_forward = 0.0
+    time_backward = 0.0
+    time_optim = 0.0
     time_eval = 0.0
 
     def save_checkpoint():
@@ -193,21 +190,31 @@ def train(
             break
 
         t0 = time.time()
-        epoch, (state, label) = next(train_iter)
+        epoch, (state, target) = next(train_iter)
         time_data += time.time() - t0
 
         t0 = time.time()
-        state, label = state.to(device), label.to(device)
+        state, target = state.to(device), target.to(device)
         time_transfer += time.time() - t0
 
-        t0 = time.time()
         optimizer.zero_grad()
+
+        t0 = time.time()
         logits = model(state)
-        target = labels_to_indices(label)
         loss = criterion(logits, target)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        time_forward += time.time() - t0
+
+        t0 = time.time()
         loss.backward()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        time_backward += time.time() - t0
+
+        t0 = time.time()
         optimizer.step()
-        time_train += time.time() - t0
+        time_optim += time.time() - t0
 
         step += 1
         samples_seen += len(target)
@@ -226,16 +233,28 @@ def train(
             train_loss = train_loss_sum / (train_total / batch_size)
             train_acc = train_correct / train_total
 
-            time_total = time_data + time_transfer + time_train + time_eval
+            time_total = time_data + time_transfer + time_forward + time_backward + time_optim + time_eval
             pct_data = 100 * time_data / time_total
             pct_transfer = 100 * time_transfer / time_total
-            pct_train = 100 * time_train / time_total
-            pct_eval = 100 * time_eval / time_total
+            pct_forward = 100 * time_forward / time_total
+            pct_backward = 100 * time_backward / time_total
+            pct_optim = 100 * time_optim / time_total
+
+            # Dataloader breakdown
+            dl_total = train_loader.time_mmap + train_loader.time_tensor + train_loader.time_vocab
+            if dl_total > 0:
+                pct_mmap = 100 * train_loader.time_mmap / dl_total
+                pct_tensor = 100 * train_loader.time_tensor / dl_total
+                pct_vocab = 100 * train_loader.time_vocab / dl_total
+                dl_breakdown = f"[mmap {pct_mmap:.0f}% tensor {pct_tensor:.0f}% vocab {pct_vocab:.0f}%]"
+            else:
+                dl_breakdown = ""
 
             print(
                 f"[{run_name}] {total_elapsed:>5.0f}s | {epoch:>5} | {samples_seen:>12,} | {step:>7,} | {train_loss:>7.3f} | {train_acc:>5.1%} | {eval_metrics['eval_acc']:>5.1%} | "
-                f"data {pct_data:.0f}% xfer {pct_transfer:.0f}% train {pct_train:.0f}%"
+                f"data {pct_data:.0f}% xfer {pct_transfer:.0f}% fwd {pct_forward:.0f}% bwd {pct_backward:.0f}% opt {pct_optim:.0f}%"
             )
+            print(f"[{run_name}]   dataloader: {dl_breakdown}")
 
             wandb.log({
                 "epoch": epoch,
@@ -245,8 +264,9 @@ def train(
                 "samples_seen": samples_seen,
                 "pct_data": pct_data,
                 "pct_transfer": pct_transfer,
-                "pct_train": pct_train,
-                "pct_eval": pct_eval,
+                "pct_forward": pct_forward,
+                "pct_backward": pct_backward,
+                "pct_optim": pct_optim,
             }, step=step)
 
             train_loss_sum = 0.0

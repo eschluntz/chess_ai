@@ -79,3 +79,36 @@ Result: Contiguous blocks of all-zero feature vectors in the training data. The 
 2. Re-ran precomputation from scratch
 
 NOTE: Reran with the fix - spikes were gone, loss curve was the same.
+
+## 2026-01-11: Compact Data Format Validation
+
+**Goal**: Validate new compact data pipeline against previous results.
+
+**Changes from previous experiments**:
+- **Output format**: 20,480 classes (64×64×5 for from/to/promo) vs ~1,968 UCI vocab
+- **Input features**: 837 features vs 779 (added 64-dim en passant layer)
+- **Data pipeline**: Compact format with GPU-side expansion, proper shuffle across full dataset
+
+**Baseline comparison**: L1 H1024, 30 min, 50M samples
+- Old result: 14.93% eval acc
+- Expected: Similar accuracy (output space is larger but moves are the same)
+
+**Run**: `mlp_size_L1_H1024_compact`
+
+### Results (20,480 output vocab - stopped early)
+
+| Time | Samples | Train Acc | Eval Acc | Notes |
+|------|---------|-----------|----------|-------|
+| 720s | 10.6M   | 13.3%     | 14.1%    | 5x slower than old format due to 20k output layer |
+
+**Issue found**: Output layer has 20,480 classes (64×64×5) vs old ~1,968 vocab. This 10x increase in output size caused:
+- 7.8x more parameters (21.8M vs 2.8M for L1 H1024)
+- ~5x slower training throughput
+
+**Fix**: Build vocab from training data to reduce output space back to ~1,968.
+
+### Results (with vocab - pending)
+[mlp_size_L1_H1024_compact_vocab]   720s |     0 |   21,140,224 |  82,579 |   3.123 | 14.3% | 14.8% | data 2% xfer 3% train 95%
+
+2x faster than before, but still ~3x slower than pre-computing everything.
+

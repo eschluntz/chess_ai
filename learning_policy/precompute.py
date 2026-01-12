@@ -2,10 +2,10 @@
 Precompute compact format locally or on Modal.
 
 Usage:
-    python precompute.py                     # 1M samples locally (default)
-    python precompute.py --num-samples 50M  # 50M samples locally
-    modal run precompute.py                  # 50M samples on Modal
-    modal run precompute.py --num-samples 784M  # full dataset on Modal
+    python precompute.py                                       # 1M locally (default)
+    python precompute.py --num-samples 50M                     # 50M locally
+    modal run --detach precompute.py::precompute_modal         # 50M on Modal
+    modal run --detach precompute.py::precompute_modal_full    # 784M on Modal (high memory)
 """
 
 import time
@@ -25,6 +25,10 @@ image = (
 
 data_volume = modal.Volume.from_name("chess-policy-data", create_if_missing=True)
 
+# Threshold: stream up to 50M, download only for full dataset
+# (ds.select() with large random indices OOMs on standard Modal memory)
+STREAMING_THRESHOLD = 50_000_000
+
 
 def format_count(n: int) -> str:
     """Format sample count for folder name: 1000000 -> '1M', 50000000 -> '50M'."""
@@ -35,11 +39,11 @@ def format_count(n: int) -> str:
     return str(n)
 
 
-def parse_num_samples(ns: str) -> int:
-    """Parse num_samples string: '1M' -> 1000000, '50M' -> 50000000, 'full' -> 784M."""
+def parse_num_samples(ns: str) -> int | str:
+    """Parse num_samples string: '1M' -> 1000000, 'full' -> 'full' (use entire dataset)."""
     ns = ns.lower()
     if ns == "full":
-        return 784_000_000
+        return "full"  # Signal to use entire dataset
     elif ns.endswith("m"):
         return int(ns[:-1]) * 1_000_000
     elif ns.endswith("k"):
@@ -47,38 +51,43 @@ def parse_num_samples(ns: str) -> int:
     return int(ns)
 
 
-@app.function(
-    image=image,
-    volumes={"/root/cache": data_volume},
-    timeout=86400,  # 24 hours for full dataset
-)
-def precompute_modal(num_samples: str = "50M", eval_size: int = 10_000):
-    """Run precompute on Modal with volume storage."""
-    import sys
-
-    sys.path.insert(0, "/root")
-    _precompute(num_samples, Path("/root/cache/compact"), eval_size)
-    data_volume.commit()
-
-
-def precompute_local(
-    num_samples: str = "1M", eval_size: int = 10_000, output_dir: str = "cache/compact"
-):
-    """Run precompute locally."""
-    _precompute(num_samples, Path(output_dir), eval_size)
-
-
-def _precompute(num_samples: str, output_dir: Path, eval_size: int):
-    """Core precompute logic."""
-    from board_repr import fen_to_compact, uci_to_compact
+def _precompute(num_samples: str | int, output_dir: Path, eval_size: int):
+    """Core precompute logic. Auto-selects streaming vs download based on size."""
     from datasets import load_dataset
 
-    num_samples = (
-        parse_num_samples(num_samples) if isinstance(num_samples, str) else num_samples
-    )
+    from board_repr import fen_to_compact, uci_to_compact
 
-    # Create subfolder based on sample count
-    output_dir = output_dir / format_count(num_samples)
+    parsed = parse_num_samples(num_samples) if isinstance(num_samples, str) else num_samples
+    use_full = parsed == "full"
+
+    # For "full", we need to download first to know the size
+    if use_full:
+        print("Loading dataset (downloading full)...")
+        ds = load_dataset("Lichess/chess-position-evaluations", split="train")
+        num_samples = len(ds)
+        folder_name = "full"
+        print(f"Full dataset: {num_samples:,} samples")
+    elif parsed <= STREAMING_THRESHOLD:
+        num_samples = parsed
+        folder_name = format_count(num_samples)
+        print("Loading dataset (streaming)...")
+        ds = load_dataset("Lichess/chess-position-evaluations", split="train", streaming=True)
+        ds = ds.shuffle(seed=42, buffer_size=100_000)
+    else:
+        num_samples = parsed
+        folder_name = format_count(num_samples)
+        print("Loading dataset (downloading)...")
+        ds = load_dataset("Lichess/chess-position-evaluations", split="train")
+        total = len(ds)
+        if num_samples < total:
+            # Random sample for representative subset (handles distribution drift)
+            print(f"Sampling {num_samples:,} from {total:,} total...")
+            rng = np.random.default_rng(seed=42)
+            indices = rng.choice(total, size=num_samples, replace=False)
+            indices = np.sort(indices)  # Sort for sequential disk access
+            ds = ds.select(indices)
+
+    output_dir = output_dir / folder_name
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Precomputing {num_samples:,} samples to {output_dir}")
@@ -92,13 +101,6 @@ def _precompute(num_samples: str, output_dir: Path, eval_size: int):
     from_sq = np.zeros(num_samples, dtype=np.uint8)
     to_sq = np.zeros(num_samples, dtype=np.uint8)
     promotion = np.zeros(num_samples, dtype=np.uint8)
-
-    # Stream dataset
-    print("Loading dataset (streaming)...")
-    ds = load_dataset(
-        "Lichess/chess-position-evaluations", split="train", streaming=True
-    )
-    ds = ds.shuffle(seed=42, buffer_size=100_000)
 
     print("Processing samples...")
     t0 = time.perf_counter()
@@ -123,13 +125,11 @@ def _precompute(num_samples: str, output_dir: Path, eval_size: int):
 
     elapsed = time.perf_counter() - t0
     rate = num_samples / elapsed
-    print(
-        f"Processed {num_samples:,} samples in {elapsed:.1f}s ({rate:.0f} samples/sec)"
-    )
+    print(f"Processed {num_samples:,} samples in {elapsed:.1f}s ({rate:.0f} samples/sec)")
 
     # Shuffle indices for uniform train/eval split
     print("Shuffling indices...")
-    rng = np.random.default_rng(seed=42)
+    rng = np.random.default_rng(seed=43)  # Different seed from sampling
     perm = rng.permutation(num_samples)
     eval_idx = perm[:eval_size]
     train_idx = perm[eval_size:]
@@ -142,11 +142,10 @@ def _precompute(num_samples: str, output_dir: Path, eval_size: int):
         """Save arr[idx] to path without loading full result into memory."""
         shape = (len(idx),) + arr.shape[1:]
         out = np.lib.format.open_memmap(path, mode="w+", dtype=arr.dtype, shape=shape)
-        for i in range(0, len(idx), chunk_size):
-            out[i : i + chunk_size] = arr[idx[i : i + chunk_size]]
+        for j in range(0, len(idx), chunk_size):
+            out[j : j + chunk_size] = arr[idx[j : j + chunk_size]]
         del out  # Flush to disk
 
-    # Save arrays by gathering shuffled indices in chunks
     print("Saving eval arrays...")
     save_indexed(boards, eval_idx, output_dir / "eval_boards.npy")
     save_indexed(turn, eval_idx, output_dir / "eval_turn.npy")
@@ -165,16 +164,46 @@ def _precompute(num_samples: str, output_dir: Path, eval_size: int):
     save_indexed(to_sq, train_idx, output_dir / "train_to_sq.npy")
     save_indexed(promotion, train_idx, output_dir / "train_promotion.npy")
 
-    # Calculate size
     total_bytes = sum(f.stat().st_size for f in output_dir.glob("*.npy"))
     print(f"Total size: {total_bytes / 1e9:.2f} GB")
     print("Done!")
 
 
-@app.local_entrypoint()
-def main(num_samples: str = "50M", eval_size: int = 10_000):
-    """Modal entrypoint - runs precompute on Modal."""
-    precompute_modal.remote(num_samples=num_samples, eval_size=eval_size)
+# Local execution
+def precompute_local(num_samples: str = "1M", eval_size: int = 10_000, output_dir: str = "cache/compact"):
+    """Run precompute locally."""
+    _precompute(num_samples, Path(output_dir), eval_size)
+
+
+# Modal execution - standard memory (up to ~50M samples)
+@app.function(
+    image=image,
+    volumes={"/root/cache": data_volume},
+    timeout=86400,
+)
+def precompute_modal(num_samples: str = "50M", eval_size: int = 10_000):
+    """Run precompute on Modal - standard memory for datasets up to ~50M."""
+    import sys
+
+    sys.path.insert(0, "/root")
+    _precompute(num_samples, Path("/root/cache/compact"), eval_size)
+    data_volume.commit()
+
+
+# Modal execution - high memory (for full 784M dataset)
+@app.function(
+    image=image,
+    volumes={"/root/cache": data_volume},
+    timeout=86400,
+    memory=128000,
+)
+def precompute_modal_full(num_samples: str = "full", eval_size: int = 10_000):
+    """Run precompute on Modal - high memory for full dataset."""
+    import sys
+
+    sys.path.insert(0, "/root")
+    _precompute(num_samples, Path("/root/cache/compact"), eval_size)
+    data_volume.commit()
 
 
 if __name__ == "__main__":
