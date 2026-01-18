@@ -3,8 +3,10 @@ Chess policy training - runs locally or on Modal.
 
 Usage:
     modal run --detach train_modal.py::train --num-samples 50M --max-seconds 3600
+    modal run --detach train_modal.py::sweep
     python train_modal.py --num-samples 1M --max-seconds 300
 """
+
 import modal
 
 app = modal.App("chess-policy")
@@ -15,10 +17,13 @@ image = (
     .add_local_file("data.py", "/root/data.py")
     .add_local_file("board_repr.py", "/root/board_repr.py")
     .add_local_file("mlp_model.py", "/root/mlp_model.py")
+    .add_local_file("cnn_model.py", "/root/cnn_model.py")
 )
 
 data_volume = modal.Volume.from_name("chess-policy-data", create_if_missing=True)
-checkpoint_volume = modal.Volume.from_name("chess-policy-checkpoints", create_if_missing=True)
+checkpoint_volume = modal.Volume.from_name(
+    "chess-policy-checkpoints", create_if_missing=True
+)
 
 
 @app.function(
@@ -29,17 +34,19 @@ checkpoint_volume = modal.Volume.from_name("chess-policy-checkpoints", create_if
     timeout=86400,
 )
 def train(
-    hidden_size: int = 256,
+    hidden_channels: int = 32,
     num_layers: int = 1,
+    kernel_size: int = 15,
     batch_size: int = 256,
     lr: float = 0.001,
     max_seconds: int = 1200,
-    eval_interval_seconds: int = 60,
+    eval_interval_seconds: int = 30,
     run_name: str = None,
     checkpoint_dir: str = "checkpoints",
     num_samples: str = "50M",
 ):
     import sys
+
     sys.path.insert(0, "/root")
 
     import os
@@ -50,8 +57,9 @@ def train(
     import torch.optim as optim
     import wandb
 
+    # from mlp_model import PolicyMLP
+    from cnn_model import PolicyCNN
     from data import get_dataloaders
-    from mlp_model import PolicyMLP
 
     is_modal = bool(os.environ.get("MODAL_TASK_ID"))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -60,26 +68,30 @@ def train(
     print(f"[{run_name}] Using device: {device}")
 
     if run_name is None:
-        run_name = f"L{num_layers}_H{hidden_size}"
+        run_name = f"L{num_layers}_H{hidden_channels}_K{kernel_size}_B{batch_size}_LR{lr}_S{num_samples}"
 
     print("=" * 60)
     print(f"[{run_name}] Policy Network Training")
     print("=" * 60)
 
     # Load data from precomputed features
-    train_loader, eval_loader, vocab = get_dataloaders(batch_size, num_samples=num_samples)
+    train_loader, eval_loader, vocab = get_dataloaders(
+        batch_size, num_samples=num_samples
+    )
     total_samples = train_loader.num_samples
     num_moves = vocab.num_moves
     print(f"[{run_name}] Training on {total_samples:,} samples")
 
     # Create model
-    model = PolicyMLP(
+    model = PolicyCNN(
         num_moves=num_moves,
-        hidden_size=hidden_size,
+        hidden_channels=hidden_channels,
         num_layers=num_layers,
+        kernel_size=kernel_size,
     ).to(device)
+    model = torch.compile(model)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0)
 
     @torch.no_grad()
     def estimate_eval_loss():
@@ -99,7 +111,7 @@ def train(
     num_params = sum(p.numel() for p in model.parameters())
 
     print(f"[{run_name}] Model: {num_params:,} parameters")
-    print(f"[{run_name}] Layers: {num_layers}, Hidden: {hidden_size}")
+    print(f"[{run_name}] Layers: {num_layers}, Hidden: {hidden_channels}")
     print(f"[{run_name}] Output classes: {num_moves}")
     print(f"[{run_name}] Batch size: {batch_size}, LR: {lr}")
     print(f"[{run_name}] Max time: {max_seconds}s")
@@ -119,7 +131,9 @@ def train(
         step = ckpt["step"]
         elapsed_before = ckpt["elapsed_seconds"]
         wandb_run_id = ckpt.get("wandb_run_id")
-        print(f"[{run_name}] Resumed from step {step}, {elapsed_before:.0f}s already elapsed")
+        print(
+            f"[{run_name}] Resumed from step {step}, {elapsed_before:.0f}s already elapsed"
+        )
 
     wandb.init(
         project="chess-policy",
@@ -127,8 +141,9 @@ def train(
         id=wandb_run_id,
         resume="allow" if wandb_run_id else None,
         config={
-            "hidden_size": hidden_size,
+            "hidden_channels": hidden_channels,
             "num_layers": num_layers,
+            "kernel_size": kernel_size,
             "batch_size": batch_size,
             "learning_rate": lr,
             "max_seconds": max_seconds,
@@ -140,7 +155,9 @@ def train(
     wandb_run_id = wandb.run.id
 
     print(f"[{run_name}] " + "-" * 80)
-    print(f"[{run_name}] {'Time':>6} | {'Epoch':>5} | {'Samples':>12} | {'Step':>7} | {'Loss':>7} | {'Train':>6} | {'Eval':>6}")
+    print(
+        f"[{run_name}] {'Time':>6} | {'Epoch':>5} | {'Samples':>12} | {'Step':>7} | {'Loss':>7} | {'Train':>6} | {'Eval':>6}"
+    )
     print(f"[{run_name}] " + "-" * 80)
 
     start_time = time.time()
@@ -161,13 +178,16 @@ def train(
 
     def save_checkpoint():
         tmp_path = checkpoint_path + ".tmp"
-        torch.save({
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "step": step,
-            "elapsed_seconds": total_elapsed,
-            "wandb_run_id": wandb_run_id,
-        }, tmp_path)
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "step": step,
+                "elapsed_seconds": total_elapsed,
+                "wandb_run_id": wandb_run_id,
+            },
+            tmp_path,
+        )
         os.replace(tmp_path, checkpoint_path)
         if is_modal:
             checkpoint_volume.commit()
@@ -233,7 +253,14 @@ def train(
             train_loss = train_loss_sum / (train_total / batch_size)
             train_acc = train_correct / train_total
 
-            time_total = time_data + time_transfer + time_forward + time_backward + time_optim + time_eval
+            time_total = (
+                time_data
+                + time_transfer
+                + time_forward
+                + time_backward
+                + time_optim
+                + time_eval
+            )
             pct_data = 100 * time_data / time_total
             pct_transfer = 100 * time_transfer / time_total
             pct_forward = 100 * time_forward / time_total
@@ -241,7 +268,11 @@ def train(
             pct_optim = 100 * time_optim / time_total
 
             # Dataloader breakdown
-            dl_total = train_loader.time_mmap + train_loader.time_tensor + train_loader.time_vocab
+            dl_total = (
+                train_loader.time_mmap
+                + train_loader.time_tensor
+                + train_loader.time_vocab
+            )
             if dl_total > 0:
                 pct_mmap = 100 * train_loader.time_mmap / dl_total
                 pct_tensor = 100 * train_loader.time_tensor / dl_total
@@ -256,18 +287,21 @@ def train(
             )
             print(f"[{run_name}]   dataloader: {dl_breakdown}")
 
-            wandb.log({
-                "epoch": epoch,
-                "train_loss": train_loss,
-                "train_acc": train_acc,
-                **eval_metrics,
-                "samples_seen": samples_seen,
-                "pct_data": pct_data,
-                "pct_transfer": pct_transfer,
-                "pct_forward": pct_forward,
-                "pct_backward": pct_backward,
-                "pct_optim": pct_optim,
-            }, step=step)
+            wandb.log(
+                {
+                    "epoch": epoch,
+                    "train_loss": train_loss,
+                    "train_acc": train_acc,
+                    **eval_metrics,
+                    "samples_seen": samples_seen,
+                    "pct_data": pct_data,
+                    "pct_transfer": pct_transfer,
+                    "pct_forward": pct_forward,
+                    "pct_backward": pct_backward,
+                    "pct_optim": pct_optim,
+                },
+                step=step,
+            )
 
             train_loss_sum = 0.0
             train_correct = 0
@@ -290,35 +324,33 @@ def train(
         "final_eval_acc": eval_metrics["eval_acc"],
         "num_params": num_params,
         "num_layers": num_layers,
-        "hidden_size": hidden_size,
+        "hidden_channels": hidden_channels,
+        "kernel_size": kernel_size,
         "total_steps": step,
     }
 
 
-@app.function(image=image, timeout=14400)  # 4 hours for sweep coordination
+@app.function(image=image, timeout=28800)  # 8 hours for sweep coordination
 def sweep():
-    """Run parallel training with different configurations."""
-    # Sweep over depth (num_layers) and width (hidden_size)
-    # All runs: 1 hour, lr=0.001, batch_size=256
+    """Run parallel training comparing deep vs wide at 20M and 30M params."""
+    # K=3 fixed (winner from kernel size sweep)
+    # Vary hidden_channels (H) and num_layers (L) to hit param targets
+    # Params ≈ 126,000*H + 18*L*H²
     configs = [
-        # Width sweep at depth=1
-        {"num_layers": 1, "hidden_size": 1024},
-        {"num_layers": 1, "hidden_size": 2048},
-        {"num_layers": 1, "hidden_size": 4096},
-        # Depth=2 sweep
-        {"num_layers": 2, "hidden_size": 1024},
-        {"num_layers": 2, "hidden_size": 2048},
-        {"num_layers": 2, "hidden_size": 4096},
-        # Depth=3 sweep
-        {"num_layers": 3, "hidden_size": 1024},
-        {"num_layers": 3, "hidden_size": 2048},
-        {"num_layers": 3, "hidden_size": 4096},
+        # 20M params
+        {"hidden_channels": 96, "num_layers": 48, "run_name": "20M_deep"},   # ~20M
+        {"hidden_channels": 112, "num_layers": 27, "run_name": "20M_med"},   # ~20M
+        {"hidden_channels": 128, "num_layers": 14, "run_name": "20M_wide"},  # ~20M
+        # 30M params
+        {"hidden_channels": 112, "num_layers": 71, "run_name": "30M_deep"},  # ~30M
+        {"hidden_channels": 144, "num_layers": 32, "run_name": "30M_med"},   # ~30M
+        {"hidden_channels": 176, "num_layers": 14, "run_name": "30M_wide"},  # ~30M
     ]
 
     # Add common settings
     for cfg in configs:
-        cfg["max_seconds"] = 3600  # 1 hour
-        cfg["run_name"] = f"mlp_size_L{cfg['num_layers']}_H{cfg['hidden_size']}"
+        cfg["kernel_size"] = 3
+        cfg["max_seconds"] = 7200  # 2 hours
 
     print(f"Launching {len(configs)} parallel runs:")
     for cfg in configs:
@@ -345,14 +377,19 @@ def sweep():
 
     if results:
         print(f"\nSUCCEEDED ({len(results)}/{len(configs)}):")
-        print(f"  {'Name':>15} | {'Acc':>7} | {'Layers':>6} | {'Hidden':>6} | {'Params':>10}")
-        print(f"  {'-'*15}-+-{'-'*7}-+-{'-'*6}-+-{'-'*6}-+-{'-'*10}")
+        print(
+            f"  {'Name':>12} | {'Acc':>7} | {'Hidden':>6} | {'Layers':>6} | {'Params':>10}"
+        )
+        print(f"  {'-' * 12}-+-{'-' * 7}-+-{'-' * 6}-+-{'-' * 6}-+-{'-' * 10}")
         for r in sorted(results, key=lambda x: x["final_eval_acc"], reverse=True):
-            print(f"  {r['run_name']:>15} | {r['final_eval_acc']:>6.2%} | {r['num_layers']:>6} | {r['hidden_size']:>6} | {r['num_params']:>10,}")
+            print(
+                f"  {r['run_name']:>12} | {r['final_eval_acc']:>6.2%} | {r['hidden_channels']:>6} | {r['num_layers']:>6} | {r['num_params']:>10,}"
+            )
 
     return results
 
 
 if __name__ == "__main__":
     import fire
+
     fire.Fire(train.local)

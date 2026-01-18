@@ -104,3 +104,43 @@ Iterations:
 **Storage tradeoff**: Planes format is 42 GB vs 6.8 GB for compact (6x larger), but 2.8x faster than compact+vocab.
 
 **Final state**: Backward pass (actual gradient compute) is now the dominant cost. One epoch over 50M samples takes ~10 minutes.
+
+## 2026-01-17: CNN Kernel Size vs Depth
+
+**Goal**: Compare small-kernel-deep vs large-kernel-shallow CNNs at constant parameter count (~10M).
+
+**Setup**:
+- Architecture: ResNet-style CNN with pre-norm, GELU, 2 convs per residual block
+- Input: 18 channels (13 piece planes + 5 broadcasted meta channels)
+- Output: Linear head to 1,968 moves (~8M params, constant across configs)
+- Fixed: hidden_channels=64, batch_size=256, lr=0.001
+- Training: 1 hour per run, 50M samples
+- Sweep: kernel_size with num_layers adjusted to keep conv params ~2M
+
+| Config | Kernel | Layers | Conv Params | Receptive Field |
+|--------|--------|--------|-------------|-----------------|
+| K3_L27 | 3      | 27     | ~2.0M       | 55 squares      |
+| K5_L10 | 5      | 10     | ~2.0M       | 41 squares      |
+| K7_L5  | 7      | 5      | ~2.0M       | 31 squares      |
+| K9_L3  | 9      | 3      | ~2.0M       | 25 squares      |
+| K11_L2 | 11     | 2      | ~2.0M       | 21 squares      |
+| K15_L1 | 15     | 1      | ~1.8M       | 15 squares      |
+
+### Results
+
+| Config   | Kernel | Layers | Params     | Eval Acc |
+|----------|--------|--------|------------|----------|
+| K3_L27   | 3      | 27     | 10,518,000 | **20.49%** |
+| K5_L10   | 5      | 10     | 10,313,072 | 17.92%   |
+| K7_L5    | 7      | 5      | 10,217,200 | 17.39%   |
+| K9_L3    | 9      | 3      | 10,204,656 | 16.55%   |
+| K11_L2   | 11     | 2      | 10,226,032 | 15.87%   |
+| K15_L1   | 15     | 1      | 10,190,064 | 15.44%   |
+
+### Conclusions
+
+1. **Small kernels + depth wins**: Despite K15_L1 having best early accuracy (large receptive field learns fast), K3_L27 ultimately won by 5 percentage points. The ranking is almost perfectly monotonic with kernel size.
+
+2. **Depth enables hierarchical features**: Small 3×3 kernels can only see local patterns, but stacking 27 layers lets the network build increasingly abstract representations. This beats "seeing everything at once" with a 15×15 kernel.
+
+**Next steps**: Try even deeper networks with K=3, explore residual connection variants, add torch.compile() for speedup.
