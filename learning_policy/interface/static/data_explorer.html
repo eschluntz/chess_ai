@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chess Training Data Explorer</title>
+
+    <!-- Chessboard.js -->
+    <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+    <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            color: #4ecca3;
+            margin-bottom: 20px;
+        }
+
+        .main-layout {
+            display: flex;
+            gap: 30px;
+            align-items: flex-start;
+        }
+
+        .board-container {
+            position: relative;
+            width: 500px;
+            flex-shrink: 0;
+        }
+
+        #board {
+            width: 500px;
+        }
+
+        #arrow-svg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 500px;
+            height: 500px;
+            pointer-events: none;
+            z-index: 100;
+        }
+
+        .controls {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .control-group {
+            background: #16213e;
+            padding: 15px;
+            border-radius: 8px;
+        }
+
+        .control-group h3 {
+            margin: 0 0 10px 0;
+            color: #4ecca3;
+            font-size: 14px;
+            text-transform: uppercase;
+        }
+
+        .stats-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .stat-item {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #4ecca3;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #888;
+        }
+
+        .nav-row {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .index-input {
+            display: flex;
+            gap: 5px;
+            align-items: center;
+        }
+
+        .index-input input {
+            width: 80px;
+            padding: 8px;
+            border: 1px solid #393e6f;
+            border-radius: 6px;
+            background: #0f0f23;
+            color: #eee;
+            font-family: monospace;
+            text-align: center;
+        }
+
+        button {
+            background: #4ecca3;
+            color: #1a1a2e;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: #3dbd94;
+        }
+
+        button.secondary {
+            background: #393e6f;
+            color: #eee;
+        }
+
+        button.secondary:hover {
+            background: #4a4f80;
+        }
+
+        .move-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .move-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 10px;
+            border-radius: 4px;
+            margin-bottom: 4px;
+            align-items: center;
+        }
+
+        .move-item:nth-child(odd) {
+            background: #0f0f23;
+        }
+
+        .move-name {
+            font-family: monospace;
+            font-weight: bold;
+            font-size: 14px;
+        }
+
+        .prob-bar-container {
+            flex: 1;
+            margin: 0 15px;
+            height: 8px;
+            background: #0f0f23;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .prob-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #4ecca3, #2ecc71);
+            border-radius: 4px;
+        }
+
+        .prob-value {
+            font-family: monospace;
+            font-size: 13px;
+            color: #4ecca3;
+            min-width: 50px;
+            text-align: right;
+        }
+
+        .fen-display {
+            font-family: monospace;
+            font-size: 11px;
+            color: #888;
+            word-break: break-all;
+            padding: 8px;
+            background: #0f0f23;
+            border-radius: 4px;
+        }
+
+        .tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            z-index: 200;
+            white-space: nowrap;
+        }
+
+        #arrow-svg line {
+            pointer-events: stroke;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Chess Training Data Explorer</h1>
+
+        <div class="main-layout">
+            <div class="board-container">
+                <div id="board"></div>
+                <svg id="arrow-svg" viewBox="0 0 500 500"></svg>
+                <div id="tooltip" class="tooltip" style="display: none;"></div>
+            </div>
+
+            <div class="controls">
+                <div class="control-group">
+                    <h3>Position Info</h3>
+                    <div class="stats-row">
+                        <div class="stat-item">
+                            <div class="stat-value" id="current-index">0</div>
+                            <div class="stat-label">Index</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value" id="total-positions">0</div>
+                            <div class="stat-label">Total</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value" id="num-moves">0</div>
+                            <div class="stat-label">Moves</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3>Navigation</h3>
+                    <div class="nav-row">
+                        <button id="prev-btn" class="secondary">&larr; Prev</button>
+                        <button id="next-btn" class="secondary">Next &rarr;</button>
+                        <div class="index-input">
+                            <input type="number" id="index-input" value="0" min="0">
+                            <button id="go-btn">Go</button>
+                        </div>
+                        <button id="random-btn" class="secondary">Random</button>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3>Board Controls</h3>
+                    <div class="nav-row">
+                        <button id="flip-btn" class="secondary">Flip Board</button>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3>Soft Labels (Move Probabilities)</h3>
+                    <div id="move-list" class="move-list"></div>
+                </div>
+
+                <div class="control-group">
+                    <h3>FEN</h3>
+                    <div id="fen-display" class="fen-display"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // State
+        let board = null;
+        let boardOrientation = 'white';
+        let currentPosition = null;
+        let totalPositions = 0;
+
+        // Square size (board is 500px, 8 squares)
+        const SQUARE_SIZE = 500 / 8;
+
+        // Initialize board
+        function initBoard() {
+            const config = {
+                draggable: false,
+                position: 'start',
+                orientation: boardOrientation,
+                pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png'
+            };
+            board = Chessboard('board', config);
+        }
+
+        // Get square center coordinates
+        function getSquareCenter(square) {
+            const file = square.charCodeAt(0) - 97;
+            const rank = parseInt(square[1]) - 1;
+
+            let x, y;
+            if (boardOrientation === 'white') {
+                x = file * SQUARE_SIZE + SQUARE_SIZE / 2;
+                y = (7 - rank) * SQUARE_SIZE + SQUARE_SIZE / 2;
+            } else {
+                x = (7 - file) * SQUARE_SIZE + SQUARE_SIZE / 2;
+                y = rank * SQUARE_SIZE + SQUARE_SIZE / 2;
+            }
+
+            return { x, y };
+        }
+
+        // Get arrow color based on probability (higher = deeper green)
+        function getProbColor(prob, maxProb) {
+            const ratio = prob / maxProb;
+            // Interpolate from light green (#90EE90) to deep green (#006400)
+            const r = Math.round(144 - (144 - 0) * ratio);
+            const g = Math.round(238 - (238 - 100) * ratio);
+            const b = Math.round(144 - (144 - 0) * ratio);
+            return `rgb(${r}, ${g}, ${b})`;
+        }
+
+        // Draw arrows for moves
+        function drawArrows(moves) {
+            const svg = document.getElementById('arrow-svg');
+            svg.innerHTML = '';
+
+            if (!moves || moves.length === 0) return;
+
+            const maxProb = Math.max(...moves.map(m => m.probability));
+
+            // Create defs for arrowhead markers
+            const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+
+            moves.forEach((move, idx) => {
+                const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+                marker.setAttribute('id', `arrowhead-${idx}`);
+                marker.setAttribute('markerWidth', '4');
+                marker.setAttribute('markerHeight', '4');
+                marker.setAttribute('refX', '3');
+                marker.setAttribute('refY', '2');
+                marker.setAttribute('orient', 'auto');
+
+                const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+                polygon.setAttribute('points', '0 0, 4 2, 0 4');
+                const color = getProbColor(move.probability, maxProb);
+                polygon.setAttribute('fill', color);
+
+                marker.appendChild(polygon);
+                defs.appendChild(marker);
+            });
+
+            svg.appendChild(defs);
+
+            // Draw arrows
+            moves.forEach((moveData, idx) => {
+                const move = moveData.move;
+                const from = move.substring(0, 2);
+                const to = move.substring(2, 4);
+
+                const fromPos = getSquareCenter(from);
+                const toPos = getSquareCenter(to);
+
+                // Shorten arrow to not overlap with pieces
+                const dx = toPos.x - fromPos.x;
+                const dy = toPos.y - fromPos.y;
+                const len = Math.sqrt(dx * dx + dy * dy);
+                const offset = 15;
+
+                const startX = fromPos.x + (dx / len) * offset;
+                const startY = fromPos.y + (dy / len) * offset;
+                const endX = toPos.x - (dx / len) * offset;
+                const endY = toPos.y - (dy / len) * offset;
+
+                const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                line.setAttribute('x1', startX);
+                line.setAttribute('y1', startY);
+                line.setAttribute('x2', endX);
+                line.setAttribute('y2', endY);
+
+                // Width and opacity based on probability
+                const probRatio = moveData.probability / maxProb;
+                const width = 3 + 5 * probRatio;
+                const opacity = 0.4 + 0.6 * probRatio;
+
+                const color = getProbColor(moveData.probability, maxProb);
+                line.setAttribute('stroke', color);
+                line.setAttribute('stroke-width', width);
+                line.setAttribute('stroke-opacity', opacity);
+                line.setAttribute('marker-end', `url(#arrowhead-${idx})`);
+                line.setAttribute('data-idx', idx);
+                line.style.pointerEvents = 'stroke';
+
+                svg.appendChild(line);
+            });
+
+            // Add hover listeners
+            setupArrowHovers(moves);
+        }
+
+        // Setup hover tooltips for arrows
+        function setupArrowHovers(moves) {
+            const svg = document.getElementById('arrow-svg');
+            const tooltip = document.getElementById('tooltip');
+
+            svg.querySelectorAll('line').forEach(line => {
+                line.addEventListener('mouseenter', (e) => {
+                    const idx = parseInt(line.getAttribute('data-idx'));
+                    const moveData = moves[idx];
+                    const probPct = (moveData.probability * 100).toFixed(1);
+                    tooltip.textContent = `${moveData.move} (${probPct}%)`;
+                    tooltip.style.display = 'block';
+                });
+
+                line.addEventListener('mousemove', (e) => {
+                    const rect = svg.parentElement.getBoundingClientRect();
+                    tooltip.style.left = (e.clientX - rect.left + 15) + 'px';
+                    tooltip.style.top = (e.clientY - rect.top - 10) + 'px';
+                });
+
+                line.addEventListener('mouseleave', () => {
+                    tooltip.style.display = 'none';
+                });
+            });
+        }
+
+        // Update move list display
+        function updateMoveList(moves) {
+            const list = document.getElementById('move-list');
+            list.innerHTML = '';
+
+            if (!moves) return;
+
+            // Already sorted by probability descending from server
+            moves.forEach(moveData => {
+                const div = document.createElement('div');
+                div.className = 'move-item';
+
+                const probPct = (moveData.probability * 100).toFixed(1);
+                div.innerHTML = `
+                    <span class="move-name">${moveData.move}</span>
+                    <div class="prob-bar-container">
+                        <div class="prob-bar" style="width: ${moveData.probability * 100}%"></div>
+                    </div>
+                    <span class="prob-value">${probPct}%</span>
+                `;
+
+                list.appendChild(div);
+            });
+        }
+
+        // Load and display a position by index
+        async function loadPosition(idx) {
+            const response = await fetch(`/api/position/${idx}`);
+            if (!response.ok) {
+                console.error('Failed to load position');
+                return;
+            }
+
+            const data = await response.json();
+            currentPosition = data;
+            totalPositions = data.total;
+
+            // Update board
+            board.position(data.fen);
+
+            // Update UI
+            document.getElementById('current-index').textContent = data.index;
+            document.getElementById('total-positions').textContent = data.total;
+            document.getElementById('num-moves').textContent = data.num_moves;
+            document.getElementById('index-input').value = data.index;
+            document.getElementById('fen-display').textContent = data.fen;
+
+            // Draw arrows and update list
+            drawArrows(data.moves);
+            updateMoveList(data.moves);
+        }
+
+        // Load stats
+        async function loadStats() {
+            const response = await fetch('/api/stats');
+            const data = await response.json();
+            totalPositions = data.total;
+        }
+
+        // Navigation
+        async function goToNext() {
+            if (currentPosition && currentPosition.index < totalPositions - 1) {
+                await loadPosition(currentPosition.index + 1);
+            }
+        }
+
+        async function goToPrev() {
+            if (currentPosition && currentPosition.index > 0) {
+                await loadPosition(currentPosition.index - 1);
+            }
+        }
+
+        async function goToRandom() {
+            const idx = Math.floor(Math.random() * totalPositions);
+            await loadPosition(idx);
+        }
+
+        async function goToIndex() {
+            const input = document.getElementById('index-input');
+            const idx = parseInt(input.value);
+            if (!isNaN(idx) && idx >= 0 && idx < totalPositions) {
+                await loadPosition(idx);
+            }
+        }
+
+        // Event listeners
+        document.getElementById('next-btn').addEventListener('click', goToNext);
+        document.getElementById('prev-btn').addEventListener('click', goToPrev);
+        document.getElementById('random-btn').addEventListener('click', goToRandom);
+        document.getElementById('go-btn').addEventListener('click', goToIndex);
+
+        document.getElementById('index-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') goToIndex();
+        });
+
+        document.getElementById('flip-btn').addEventListener('click', () => {
+            boardOrientation = boardOrientation === 'white' ? 'black' : 'white';
+            board.orientation(boardOrientation);
+            if (currentPosition) {
+                drawArrows(currentPosition.moves);
+            }
+        });
+
+        // Keyboard navigation
+        document.addEventListener('keydown', (e) => {
+            if (e.target.tagName === 'INPUT') return;
+
+            if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                goToNext();
+            } else if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                goToPrev();
+            } else if (e.key === 'r' || e.key === 'R') {
+                e.preventDefault();
+                goToRandom();
+            }
+        });
+
+        // Initialize
+        initBoard();
+        loadStats().then(() => loadPosition(0));
+    </script>
+</body>
+</html>

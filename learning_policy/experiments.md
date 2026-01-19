@@ -144,3 +144,176 @@ Iterations:
 2. **Depth enables hierarchical features**: Small 3×3 kernels can only see local patterns, but stacking 27 layers lets the network build increasingly abstract representations. This beats "seeing everything at once" with a 15×15 kernel.
 
 **Next steps**: Try even deeper networks with K=3, explore residual connection variants, add torch.compile() for speedup.
+
+## 2026-01-17: Model Scaling - Deep vs Wide
+
+**Goal**: Compare deep vs wide architectures at larger parameter counts (20M, 30M).
+
+**Setup**:
+- Architecture: Same ResNet-style CNN, K=3 fixed (winner from kernel sweep)
+- Training: 2 hours per run, 50M samples, AdamW, torch.compile()
+- Sweep: Vary hidden_channels (H) and num_layers (L) to hit 20M and 30M targets
+
+| Config | Hidden | Layers | Target |
+|--------|--------|--------|--------|
+| 20M_deep | 96 | 48 | 20M |
+| 20M_med | 112 | 27 | 20M |
+| 20M_wide | 128 | 14 | 20M |
+| 30M_deep | 112 | 71 | 30M |
+| 30M_med | 144 | 32 | 30M |
+| 30M_wide | 176 | 14 | 30M |
+
+### Results
+
+| Config | Hidden | Layers | Params | Eval Acc |
+|--------|--------|--------|--------|----------|
+| 20M_med | 112 | 27 | 21,017,760 | **19.70%** |
+| 20M_wide | 128 | 14 | 20,752,176 | 19.54% |
+| 30M_wide | 176 | 14 | 30,662,400 | 18.28% |
+| 20M_deep | 96 | 48 | 21,272,784 | 16.75% |
+| 30M_med | 144 | 32 | 31,313,760 | 15.08% |
+| 30M_deep | 112 | 71 | 32,224,032 | 14.00% |
+
+### Conclusions
+
+1. **Larger models underperformed**: The 10M baseline (20.49%) beat all 20M and 30M models. Loss curves showed models were still improving at 2 hours, suggesting larger models need more training time to converge.
+
+2. **Wide beats deep at fixed param count**: Within each size class, wider/shallower models outperformed deeper/narrower ones. The very deep variants (48-71 layers) struggled most.
+
+3. **Sweet spot for depth is ~14-27 layers**: With K=3, 14 layers gives receptive field of 29 (covers the board). Beyond that, width helps more than additional depth.
+
+**Refined architecture guidance**:
+- K=3 (small kernels for hierarchical features)
+- 14-27 layers (enough depth for full-board receptive field)
+- Scale via width, not extreme depth
+
+![Deep vs wide comparison](img/cnn_deep_vs_wide.png)
+
+**Next steps**: Run promising configs (20M_med, 20M_wide, 30M_wide) for longer (4-6 hours) to see if larger models can catch up.
+
+## 2026-01-17: Batch Size Sweep (A10 GPU)
+
+**Goal**: Find optimal batch size for 24hr scaling runs on A10 GPU.
+
+**Setup**:
+- Model: 20M wide (H=128, L=14, K=3)
+- GPU: A10G (24GB VRAM)
+- LR: 0.001 (constant across all batch sizes)
+- Training: 1 hour per config
+
+### Results
+
+| Batch Size | Samples @ 13min | Eval Acc @ 13min | GPU Memory |
+|------------|-----------------|------------------|------------|
+| 64 | 3.1M | 15.4% | — |
+| 128 | 3.7M | 17.3% | — |
+| 256 | 4.6M | 17.2% | — |
+| 512 | 4.8M | 17.3% | — |
+| 1024 | 5.2M | **18.1%** | ~12% |
+| 2048 | — | — | ~25% |
+
+### Conclusions
+
+1. **Larger batches win on both throughput and accuracy**: bs_1024 saw 67% more samples than bs_64 in the same time, and achieved higher accuracy. No critical batch size degradation observed.
+
+2. **Memory limits batch size for larger models**: bs_2048 used 25% GPU memory on 20M model. Since 100M model is ~5x larger, bs_1024 (~12% memory) is the safe choice for scaling runs.
+
+![Batch size experiment](img/batch_size_exp.png)
+
+**Selected**: batch_size=1024 for 24hr scaling experiment.
+
+## 2026-01-17: Learning Rate Sweep
+
+**Goal**: Find optimal learning rate for bs=1024 before 24hr scaling runs.
+
+**Setup**:
+- Model: 20M wide (H=128, L=14, K=3)
+- Batch size: 1024
+- GPU: A10G
+- Training: 1 hour per config
+
+### Results
+
+| Learning Rate | Eval Acc @ 14min | Loss |
+|---------------|------------------|------|
+| 1e-3 | **17.9%** | 2.841 |
+| 3e-4 | 17.5% | 2.869 |
+| 3e-3 | 15.4% | 2.971 |
+
+![LR sweep](img/cnn_lr.png)
+
+### Conclusions
+
+- **lr=0.001 confirmed**: Current default is optimal. 3e-4 is slightly slower, 3e-3 is too high.
+
+**Final config for 24hr scaling**: K=3, L=14, bs=1024, lr=0.001, A10G.
+
+## 2026-01-18: Model Scaling Experiment (16 hours)
+
+**Goal**: Scale model size from 10M to 100M parameters with extended training time.
+
+**Setup**:
+- Architecture: K=3, L=14 fixed (wide scaling via hidden_channels)
+- Batch size: 1024, LR: 0.001, AdamW
+- GPU: A10G, Training: ~16 hours per config
+- Data: 50M samples
+
+| Config | Hidden | Params | Target |
+|--------|--------|--------|--------|
+| scale_10M | 72 | ~10M | 10M |
+| scale_20M | 128 | ~20M | 20M |
+| scale_30M | 176 | ~30M | 30M |
+| scale_50M | 264 | ~51M | 50M |
+| scale_100M | 432 | ~101M | 100M |
+
+### Results
+
+| Model | Samples Seen | Train Acc | Eval Acc | Train-Eval Gap |
+|-------|--------------|-----------|----------|----------------|
+| scale_10M | 536M (10+ epochs) | 26.2% | 24.6% | +1.6% |
+| scale_20M | 435M (8+ epochs) | 30.0% | 24.4% | +5.6% |
+| scale_30M | 210M (4+ epochs) | 26.7% | 24.9% | +1.8% |
+| scale_50M | 86M (1.7 epochs) | 25.3% | 24.7% | +0.6% |
+| scale_100M | 39M (0.8 epochs) | 24.7% | 24.0% | +0.7% |
+
+### Observations
+
+![img](img/scale_eval_acc.png)
+
+**All models hit ~24-25% eval accuracy ceiling**: Despite 10x difference in parameters and 14x difference in samples seen, eval accuracy stayed within a 1% band.
+
+### Root Cause: Label Noise in Training Data
+
+Investigated why all models plateau at the same accuracy regardless of capacity.
+
+**Analysis of first 100k samples from source dataset:**
+```
+Total samples: 100,000
+Unique FENs: 13,929
+Ratio: 7.18 samples per unique FEN
+FENs with conflicting labels: 10,925 (78.4%)
+```
+
+The training data comes from Lichess's crowdsourced Stockfish analyses. The same position appears multiple times with **different "best moves"** because analyses were run at different depths. With 78% of positions having multiple conflicting labels, there's an irreducible error floor.
+
+**Example of conflicting labels:**
+```
+fen: 7r/1p3k2/p1bPR3/5p2/2B2P1p/8/PP4P1/3K4 b - -
+  Analysis 1: f7g7 (depth ?)  cp: 69
+  Analysis 2: h8d8 (depth ?)  cp: 163
+  Analysis 3: h8a8 (depth ?)  cp: 229
+```
+
+Same position, three different "correct" moves in the training data.
+
+### Conclusions
+
+1. **Model capacity is not the bottleneck**: The 24-25% ceiling is set by data quality, not model expressiveness.
+
+2. **More training time won't help**: Larger batch sizes see more epochs faster, leading to overfitting rather than improvement.
+
+3. **Data deduplication is required**: Need to aggregate by FEN and either:
+   - Keep only the highest-depth analysis per position
+   - Create soft labels weighted by analysis depth
+
+**Next steps**: Precompute deduplicated dataset with soft labels (depth-weighted move distributions) to remove label noise ceiling.

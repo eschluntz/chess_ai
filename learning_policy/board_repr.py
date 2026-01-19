@@ -8,8 +8,6 @@ Storage format per sample:
 
 Plane order: white P,N,B,R,Q,K (0-5), black P,N,B,R,Q,K (6-11), en_passant (12)
 Indexing: planes[plane, rank, file] where rank 0 = rank 1, file 0 = a-file
-
-For the legacy compact (int8 board) format, see board_repr_compact.py.
 """
 
 import numpy as np
@@ -82,7 +80,7 @@ def fen_to_planes(fen: str) -> tuple[np.ndarray, np.ndarray]:
     return planes, meta
 
 
-def uci_to_compact(uci: str) -> tuple[np.uint8, np.uint8, np.uint8]:
+def uci_to_move_tuple(uci: str) -> tuple[np.uint8, np.uint8, np.uint8]:
     """
     Parse UCI move string into compact format.
 

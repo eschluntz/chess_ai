@@ -28,7 +28,7 @@ checkpoint_volume = modal.Volume.from_name(
 
 @app.function(
     image=image,
-    gpu="T4",
+    gpu="A10G",
     secrets=[modal.Secret.from_name("wandb-secret")],
     volumes={"/root/cache": data_volume, "/root/checkpoints": checkpoint_volume},
     timeout=86400,
@@ -75,11 +75,11 @@ def train(
     print("=" * 60)
 
     # Load data from precomputed features
-    train_loader, eval_loader, vocab = get_dataloaders(
+    train_loader, eval_loader, num_classes = get_dataloaders(
         batch_size, num_samples=num_samples
     )
     total_samples = train_loader.num_samples
-    num_moves = vocab.num_moves
+    num_moves = num_classes
     print(f"[{run_name}] Training on {total_samples:,} samples")
 
     # Create model
@@ -103,9 +103,11 @@ def train(
             planes, meta, target = planes.to(device), meta.to(device), target.to(device)
             logits = model(planes, meta)
             losses.append(criterion(logits, target).item())
-            correct += (logits.argmax(dim=1) == target).sum().item()
+            correct += (logits.argmax(dim=1) == target.argmax(dim=1)).sum().item()
             total += len(target)
         model.train()
+        if total == 0:
+            return {"eval_loss": float("nan"), "eval_acc": float("nan")}
         return {"eval_loss": sum(losses) / len(losses), "eval_acc": correct / total}
 
     num_params = sum(p.numel() for p in model.parameters())
@@ -240,7 +242,7 @@ def train(
         samples_seen += len(target)
         train_loss_sum += loss.item()
         with torch.no_grad():
-            train_correct += (logits.argmax(dim=1) == target).sum().item()
+            train_correct += (logits.argmax(dim=1) == target.argmax(dim=1)).sum().item()
         train_total += len(target)
 
         if time.time() - last_eval_time >= eval_interval_seconds:
@@ -271,13 +273,13 @@ def train(
             dl_total = (
                 train_loader.time_mmap
                 + train_loader.time_tensor
-                + train_loader.time_vocab
+                + train_loader.time_labels
             )
             if dl_total > 0:
                 pct_mmap = 100 * train_loader.time_mmap / dl_total
                 pct_tensor = 100 * train_loader.time_tensor / dl_total
-                pct_vocab = 100 * train_loader.time_vocab / dl_total
-                dl_breakdown = f"[mmap {pct_mmap:.0f}% tensor {pct_tensor:.0f}% vocab {pct_vocab:.0f}%]"
+                pct_labels = 100 * train_loader.time_labels / dl_total
+                dl_breakdown = f"[mmap {pct_mmap:.0f}% tensor {pct_tensor:.0f}% labels {pct_labels:.0f}%]"
             else:
                 dl_breakdown = ""
 
@@ -289,6 +291,7 @@ def train(
 
             wandb.log(
                 {
+                    "elapsed_t": total_elapsed,
                     "epoch": epoch,
                     "train_loss": train_loss,
                     "train_acc": train_acc,
@@ -330,27 +333,26 @@ def train(
     }
 
 
-@app.function(image=image, timeout=28800)  # 8 hours for sweep coordination
+@app.function(image=image, timeout=86000)  # 23.5 hours for sweep coordination
 def sweep():
-    """Run parallel training comparing deep vs wide at 20M and 30M params."""
-    # K=3 fixed (winner from kernel size sweep)
-    # Vary hidden_channels (H) and num_layers (L) to hit param targets
-    # Params ≈ 126,000*H + 18*L*H²
+    """24hr scaling sweep: 10M to 100M params on A10 GPU."""
+    # K=3, L=14 fixed (wide architecture from previous sweeps)
+    # Scale via hidden_channels to hit param targets
+    # Params ≈ 126,000*H + 252*H²
     configs = [
-        # 20M params
-        {"hidden_channels": 96, "num_layers": 48, "run_name": "20M_deep"},   # ~20M
-        {"hidden_channels": 112, "num_layers": 27, "run_name": "20M_med"},   # ~20M
-        {"hidden_channels": 128, "num_layers": 14, "run_name": "20M_wide"},  # ~20M
-        # 30M params
-        {"hidden_channels": 112, "num_layers": 71, "run_name": "30M_deep"},  # ~30M
-        {"hidden_channels": 144, "num_layers": 32, "run_name": "30M_med"},   # ~30M
-        {"hidden_channels": 176, "num_layers": 14, "run_name": "30M_wide"},  # ~30M
+        {"hidden_channels": 72, "run_name": "scale_10M"},  # ~10M
+        {"hidden_channels": 128, "run_name": "scale_20M"},  # ~20M
+        {"hidden_channels": 176, "run_name": "scale_30M"},  # ~30M
+        {"hidden_channels": 264, "run_name": "scale_50M"},  # ~51M
+        {"hidden_channels": 432, "run_name": "scale_100M"},  # ~101M
     ]
 
     # Add common settings
     for cfg in configs:
         cfg["kernel_size"] = 3
-        cfg["max_seconds"] = 7200  # 2 hours
+        cfg["num_layers"] = 14
+        cfg["batch_size"] = 1024
+        cfg["max_seconds"] = 84600  # 23.5 hours (buffer for Modal's 24hr limit)
 
     print(f"Launching {len(configs)} parallel runs:")
     for cfg in configs:
@@ -377,13 +379,11 @@ def sweep():
 
     if results:
         print(f"\nSUCCEEDED ({len(results)}/{len(configs)}):")
-        print(
-            f"  {'Name':>12} | {'Acc':>7} | {'Hidden':>6} | {'Layers':>6} | {'Params':>10}"
-        )
-        print(f"  {'-' * 12}-+-{'-' * 7}-+-{'-' * 6}-+-{'-' * 6}-+-{'-' * 10}")
+        print(f"  {'Name':>10} | {'Acc':>7} | {'Params':>12}")
+        print(f"  {'-' * 10}-+-{'-' * 7}-+-{'-' * 12}")
         for r in sorted(results, key=lambda x: x["final_eval_acc"], reverse=True):
             print(
-                f"  {r['run_name']:>12} | {r['final_eval_acc']:>6.2%} | {r['hidden_channels']:>6} | {r['num_layers']:>6} | {r['num_params']:>10,}"
+                f"  {r['run_name']:>10} | {r['final_eval_acc']:>6.2%} | {r['num_params']:>12,}"
             )
 
     return results
