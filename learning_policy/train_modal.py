@@ -28,16 +28,16 @@ checkpoint_volume = modal.Volume.from_name(
 
 @app.function(
     image=image,
-    gpu="A10G",
+    gpu="T4",
     secrets=[modal.Secret.from_name("wandb-secret")],
     volumes={"/root/cache": data_volume, "/root/checkpoints": checkpoint_volume},
     timeout=86400,
 )
 def train(
-    hidden_channels: int = 32,
-    num_layers: int = 1,
-    kernel_size: int = 15,
-    batch_size: int = 256,
+    hidden_channels: int = 128,
+    num_layers: int = 14,
+    kernel_size: int = 3,
+    batch_size: int = 1024,
     lr: float = 0.001,
     max_seconds: int = 1200,
     eval_interval_seconds: int = 30,

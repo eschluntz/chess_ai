@@ -317,3 +317,9 @@ Same position, three different "correct" moves in the training data.
    - Create soft labels weighted by analysis depth
 
 **Next steps**: Precompute deduplicated dataset with soft labels (depth-weighted move distributions) to remove label noise ceiling.
+
+# Future Planned Experiments
+
+- [ ] I need to confirm the best strategy for combining duplicate rows (soft labels vs throw out non-max)
+- [ ] measure how much noise is in my system with several runs of exactly the same settings
+- [ ] systems efficiency: increase vocab size to be a power of 2? learning rates / $ on different GPUs.

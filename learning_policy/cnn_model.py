@@ -4,6 +4,7 @@ CNN policy network model.
 
 import torch
 import torch.nn as nn
+from einops import pack, rearrange, reduce, repeat
 
 W, H = 8, 8
 
@@ -40,9 +41,9 @@ class PolicyCNN(nn.Module):
         planes (batch, 13, 8, 8). meta (batch, 5). output (batch, 13 + 5, 8, 8)"""
 
         # unsqueeze w,h dims, then expand (Broadcast) those dims to be the right size
-        meta_pl = meta[:, :, None, None].expand(-1, -1, H, W)
-
-        return torch.cat((planes, meta_pl), dim=1).float()  # (batch, 13 + 5, 8, 8)
+        meta_pl = repeat(meta, "b n -> b n h w", h=H, w=W)
+        combined, _ = pack([planes, meta_pl], "b * h w")
+        return combined.float()  # (batch, 13 + 5, 8, 8)
 
     def __init__(
         self,
