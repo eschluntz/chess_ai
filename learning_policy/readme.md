@@ -6,9 +6,9 @@ Learn a policy model to directly predict next moves from chess positions.
 
 | File                  | Description                                            |
 |-----------------------|--------------------------------------------------------|
-| `board_repr.py`       | Compact board format, encoders, BoardState/MoveLabel   |
-| `precompute.py` | Precompute dataset to compact numpy format             |
-| `data.py`             | Data loading for compact format                        |
+| `board_repr.py`       | Board representation: FEN↔planes conversion, PlanesToFlat encoder |
+| `precompute.py` | Precompute board planes + raw analyses from HuggingFace |
+| `data.py`             | Data loading + soft label computation at train time    |
 | `mlp_model.py`        | Simple MLP policy network                              |
 | `train_modal.py`      | Training script (local or Modal)                       |
 | `test_board_repr.py`  | Unit tests for board representation                    |
@@ -17,32 +17,27 @@ Learn a policy model to directly predict next moves from chess positions.
 
 ## Data Format
 
-**Compact storage format** (136 bytes per sample):
+**Precomputed storage format** (per split, e.g. `train_*.npy`):
 ```
-boards:     int8[8, 8]    - piece codes (0=empty, 1-6=white PNBRQK, -1..-6=black)
-turn:       int8          - 1=white, -1=black
-castling:   uint8[4]      - [K, Q, k, q] as 0/1
-en_passant: uint8[8, 8]   - binary layer (1 at target square)
-from_sq:    uint8         - move origin (0-63)
-to_sq:      uint8         - move destination (0-63)
-promotion:  uint8         - 0=none, 1=N, 2=B, 3=R, 4=Q
+planes.npy:           (N, 13, 8, 8) uint8 - 12 piece planes + en_passant
+meta.npy:             (N, 5) int8 - [turn, K, Q, k, q]
+analysis_data.npy:    (total_analyses, 5) int32 - [move_idx, depth, knodes, cp_or_val, is_mate]
+analysis_offsets.npy: (N + 1,) uint32 - position boundaries
 ```
 
-**Data structures** (in `board_repr.py`):
-- `BoardState` - batched input features with `.to(device)`
-- `MoveLabel` - batched labels with `.to(device)` and `.to_uci()`
+Raw analyses are stored so that label computation (soft labels, deepest-only, etc.)
+can be changed at train time without re-running precompute.
 
 **Encoder modules** (run on GPU, part of model):
-- `CompactToSpatial(state)` → `(batch, 18, 8, 8)` for CNNs
-- `CompactToFlat(state)` → `(batch, 837)` for MLPs
+- `PlanesToFlat(planes, meta)` → `(batch, 837)` for MLPs
 
 ## Usage
 
 **Precompute dataset:**
 ```bash
-python precompute.py --num-samples 1M    # -> cache/compact/1M/   (~140 MB)
-python precompute.py --num-samples 50M   # -> cache/compact/50M/  (~6.8 GB)
-python precompute.py --num-samples full  # -> cache/compact/full/ (~115 GB)
+python precompute.py --num-samples 1M    # -> cache/planes/1M/
+python precompute.py --num-samples 50M   # -> cache/planes/50M/
+python precompute.py --num-samples full  # -> cache/planes/full/
 ```
 
 **Run tests:**
@@ -90,7 +85,7 @@ The raw dataset has one row per (position, PV) pair:
 
 **Key insight: Many positions have multiple analyses with conflicting "best" moves.**
 
-Exploring the data with `precompute_conflicts.py` and the data explorer UI shows ~90%+ of positions have multiple analyses, often at similar depths but recommending different moves. This motivates using soft labels instead of picking a single "correct" move.
+Exploring the data with the analysis scripts and the data explorer UI shows ~90%+ of positions have multiple analyses, often at similar depths but recommending different moves. This motivates using soft labels instead of picking a single "correct" move.
 
 ### Analysis Sessions
 
@@ -103,9 +98,12 @@ Different `(depth, knodes)` = different sessions (different users, times, or Sto
 
 ### Soft Label Weighting Strategy
 
-To convert multiple analyses into a probability distribution:
+Label computation happens at train time in `data.py` (not during precompute),
+so different strategies can be tested without re-running precompute.
 
-1. **Group by FEN**, then by `(depth, knodes)` to identify sessions
+Current strategy — to convert multiple analyses into a probability distribution:
+
+1. **Group by FEN**, keep only rows at the **maximum depth** (discard all shallower analyses)
 
 2. **Convert cp/mate to scores**:
    ```python
@@ -119,52 +117,41 @@ To convert multiple analyses into a probability distribution:
    # Flip sign for black to move
    ```
 
-3. **Within each session**, max-normalize by score:
+3. **Boltzmann weighting** on the deepest-depth rows:
    ```python
    weight = exp(-(max_score - score) / temperature)  # best move = 1.0
    ```
 
-4. **Across sessions**, take max (not sum) per move:
-   ```python
-   move_weight[move] = max(move_weight[move], depth * session_weight)
-   ```
+4. **Per move, take max weight** (handles multiple deepest-depth sessions with same depth but different knodes)
 
 5. **Normalize** to get final probabilities
 
-**Why max-normalization instead of softmax?**
-- Softmax normalizes so sum=1, which underweights the best move in multi-PV sessions
-- Max-normalization (max=1) means 3 equally good moves contribute 3x the evidence of 1 move
-- Single-PV and multi-PV sessions contribute equally for the same (move, cp, depth)
-
-**Why max across sessions instead of sum?**
+**Why keep only the deepest depth?**
 - A depth-40 analysis subsumes a depth-20 analysis (same engine, deeper search tree)
-- Agreement across sessions doesn't add information - the deeper analysis already "includes" the shallower one
-- A depth-40 finding cp=50 should beat depth-38 finding cp=55: the deeper search likely discovered why cp=55 was optimistic
-- Shallower analyses only matter if they found a move the deeper analysis missed entirely
+- The deeper search likely discovered why shallower evaluations were optimistic/pessimistic
+- Simpler than weighting across sessions with depth multipliers
 
-**Temperature**: Controls how much cp differences matter within a session. ~50cp (0.5 pawns) is reasonable.
+**Temperature**: Controls how much cp differences matter within the deepest session. ~50cp (0.5 pawns) is reasonable.
 
 
 ## Architecture
 
 **Training loop pattern:**
 ```python
-for state, label in dataloader:
-    state, label = state.to(device), label.to(device)
-    logits = model(state)  # model includes encoder
-    loss = criterion(logits, label)
+for planes, meta, soft_target in dataloader:
+    planes, meta, target = planes.to(device), meta.to(device), soft_target.to(device)
+    logits = model(planes, meta)
+    loss = criterion(logits, target)
 ```
 
 **Model structure:**
 ```python
-class CNNPolicy(nn.Module):
+class PolicyCNN(nn.Module):
     def __init__(self):
-        self.encoder = CompactToSpatial()  # (batch, 18, 8, 8)
-        self.backbone = nn.Sequential(...)
+        self.backbone = nn.Sequential(...)  # conv layers on (batch, 13, 8, 8) planes
         self.head = nn.Linear(...)
 
-    def forward(self, state: BoardState):
-        x = self.encoder(state)
-        x = self.backbone(x)
-        return self.head(x.flatten(1))
+    def forward(self, planes, meta):
+        x = self.backbone(planes.float())
+        return self.head(torch.cat([x.flatten(1), meta.float()], dim=1))
 ```

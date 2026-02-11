@@ -1,14 +1,18 @@
 """
-Data loading for precomputed planes format with soft labels.
+Data loading for precomputed planes format with raw analyses.
+
+Stores raw Stockfish analysis rows per position; soft labels are computed
+at train time so different labeling strategies can be tested without
+re-running precompute.
 
 Storage format:
-    planes.npy:        (N, 13, 8, 8) uint8 - 12 piece planes + en_passant
-    meta.npy:          (N, 5) int8 - [turn, K, Q, k, q]
-    label_indices.npy: (total_nonzero,) uint16 - move vocab indices
-    label_probs.npy:   (total_nonzero,) float16 - probabilities
-    label_offsets.npy: (N + 1,) uint32 - position boundaries
+    planes.npy:           (N, 13, 8, 8) uint8 - 12 piece planes + en_passant
+    meta.npy:             (N, 5) int8 - [turn, K, Q, k, q]
+    analysis_data.npy:    (total_analyses, 5) int32 - [move_idx, depth, knodes, cp_or_val, is_mate]
+    analysis_offsets.npy: (N + 1,) uint32 - position boundaries
 """
 
+import math
 import time
 import warnings
 from pathlib import Path
@@ -19,6 +23,77 @@ import torch
 warnings.filterwarnings('ignore', message='.*not writable.*')
 
 CACHE_DIR = Path(__file__).parent / "cache" / "planes"
+TEMPERATURE = 50  # centipawns - controls spread within session
+
+
+def mate_to_score(mate_in_n: int) -> float:
+    """Convert mate-in-N to a score. Mate in 1 = 10k, mate in 20+ = 1k."""
+    n = abs(mate_in_n)
+    if n >= 20:
+        score = 1000
+    else:
+        score = 10000 - 9000 * (n - 1) / 19
+    return score if mate_in_n > 0 else -score
+
+
+def analysis_to_score(cp_or_val: int, is_mate: int) -> float:
+    """Convert stored cp/mate value to comparable score."""
+    if is_mate:
+        return mate_to_score(cp_or_val)
+    return float(cp_or_val)
+
+
+def compute_soft_labels(
+    analyses: np.ndarray,
+    is_white_to_move: bool,
+) -> list[tuple[int, float]]:
+    """
+    Compute soft label probabilities from the deepest analysis session.
+
+    Keeps only analyses at the maximum depth, discarding shallower searches.
+    Within the deepest session(s), uses Boltzmann weighting on cp scores.
+
+    Args:
+        analyses: (K, 5) int32 array - [move_idx, depth, knodes, cp_or_val, is_mate]
+        is_white_to_move: True if white to move
+
+    Returns:
+        List of (move_idx, probability) pairs
+    """
+    if len(analyses) == 0:
+        return []
+
+    # Find the maximum depth
+    max_depth = analyses[:, 1].max()
+
+    # Keep only analyses at the deepest depth, collecting best score per move
+    move_scores: dict[int, float] = {}
+
+    for row in analyses:
+        move_idx, depth, knodes, cp_or_val, is_mate = row
+        if depth < max_depth:
+            continue
+        score = analysis_to_score(int(cp_or_val), int(is_mate))
+        if not is_white_to_move:
+            score = -score
+
+        move_idx = int(move_idx)
+        if move_idx not in move_scores or score > move_scores[move_idx]:
+            move_scores[move_idx] = score
+
+    if not move_scores:
+        return []
+
+    # Convert scores to Boltzmann weights
+    max_score = max(move_scores.values())
+    move_weights: dict[int, float] = {}
+    for move_idx, score in move_scores.items():
+        delta = max_score - score
+        move_weights[move_idx] = math.exp(-delta / TEMPERATURE)
+
+    # Normalize to probabilities
+    total = sum(move_weights.values())
+    return [(idx, w / total) for idx, w in move_weights.items()]
 
 
 class MoveVocab:
@@ -52,7 +127,7 @@ class MoveVocab:
 
 
 class SoftLabelDataset:
-    """Iterator that yields (planes, meta, soft_target) batches with sparse->dense conversion."""
+    """Iterator that yields (planes, meta, soft_target) batches, computing labels from raw analyses."""
 
     def __init__(self, data_dir: Path, prefix: str, batch_size: int, num_classes: int):
         self.batch_size = batch_size
@@ -62,14 +137,9 @@ class SoftLabelDataset:
         self.planes = np.load(data_dir / f"{prefix}_planes.npy", mmap_mode='r')
         self.meta = np.load(data_dir / f"{prefix}_meta.npy", mmap_mode='r')
 
-        # Load sparse labels
-        self.label_indices = torch.from_numpy(
-            np.load(data_dir / f"{prefix}_label_indices.npy").astype(np.int64)
-        )
-        self.label_probs = torch.from_numpy(
-            np.load(data_dir / f"{prefix}_label_probs.npy").astype(np.float32)
-        )
-        self.label_offsets = np.load(data_dir / f"{prefix}_label_offsets.npy")
+        # Load raw analyses
+        self.analysis_data = np.load(data_dir / f"{prefix}_analysis_data.npy")
+        self.analysis_offsets = np.load(data_dir / f"{prefix}_analysis_offsets.npy")
 
         self.num_samples = len(self.planes)
         self.num_batches = self.num_samples // batch_size
@@ -93,24 +163,22 @@ class SoftLabelDataset:
             meta_t = torch.as_tensor(meta)
             self.time_tensor += time.perf_counter() - t0
 
-            # Vectorized soft target construction
+            # Compute soft labels from raw analyses
             t0 = time.perf_counter()
 
-            label_start = self.label_offsets[start]
-            label_end = self.label_offsets[end]
-
-            batch_indices = self.label_indices[label_start:label_end]
-            batch_probs = self.label_probs[label_start:label_end]
-
-            # Compute row indices for scatter
-            local_offsets = self.label_offsets[start:end+1] - label_start
-            row_indices = torch.zeros(len(batch_indices), dtype=torch.long)
-            for j in range(self.batch_size):
-                row_indices[local_offsets[j]:local_offsets[j+1]] = j
-
-            # Scatter into dense tensor
             soft_target = torch.zeros(self.batch_size, self.num_classes)
-            soft_target[row_indices, batch_indices] = batch_probs
+
+            for j in range(self.batch_size):
+                pos_idx = start + j
+                a_start = self.analysis_offsets[pos_idx]
+                a_end = self.analysis_offsets[pos_idx + 1]
+                analyses = self.analysis_data[a_start:a_end]
+
+                is_white = meta[j][0] == 1
+                labels = compute_soft_labels(analyses, is_white)
+
+                for move_idx, prob in labels:
+                    soft_target[j, move_idx] = prob
 
             self.time_labels += time.perf_counter() - t0
 
@@ -121,7 +189,7 @@ class SoftLabelDataset:
 
 
 def get_dataloaders(batch_size: int, num_samples: str = "50M"):
-    """Load precomputed data with soft labels.
+    """Load precomputed data with raw analyses.
 
     Returns:
         train_loader: Iterator yielding (planes, meta, soft_target) batches
@@ -141,7 +209,7 @@ def get_dataloaders(batch_size: int, num_samples: str = "50M"):
         stats = np.load(stats_path, allow_pickle=True).item()
         print(f"Loaded: {stats['unique_positions']:,} unique positions")
         print(f"  (from {stats['raw_samples']:,} raw samples, {stats['dedup_ratio']:.2f}x dedup)")
-        print(f"  Avg moves per position: {stats['avg_moves_per_position']:.2f}")
+        print(f"  Avg analyses per position: {stats['avg_analyses_per_position']:.2f}")
 
     train_loader = SoftLabelDataset(data_dir, "train", batch_size, num_classes)
     eval_loader = SoftLabelDataset(data_dir, "eval", batch_size, num_classes)

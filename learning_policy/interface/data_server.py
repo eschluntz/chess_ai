@@ -2,7 +2,8 @@
 """
 Flask server for chess training data explorer.
 
-Visualizes precomputed training data with soft labels.
+Visualizes precomputed training data with soft labels computed on the fly
+from raw Stockfish analyses.
 
 Run:
     python data_server.py --data cache/planes/1M
@@ -14,14 +15,18 @@ from pathlib import Path
 import numpy as np
 from flask import Flask, jsonify, send_from_directory
 
+# Import label computation from data module
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from data import compute_soft_labels
+
 app = Flask(__name__, static_folder="static")
 
 # Global data (loaded once at startup)
 planes = None  # (N, 13, 8, 8)
 meta = None  # (N, 5)
-label_indices = None  # (total_entries,)
-label_probs = None  # (total_entries,)
-label_offsets = None  # (N+1,)
+analysis_data = None  # (total_analyses, 5)
+analysis_offsets = None  # (N+1,)
 vocab = None  # (num_moves, 3)
 num_positions = 0
 
@@ -90,16 +95,15 @@ def planes_to_fen(p: np.ndarray, m: np.ndarray) -> str:
 
 
 def load_data(data_path: Path, split: str = "train"):
-    """Load precomputed planes data."""
-    global planes, meta, label_indices, label_probs, label_offsets, vocab, num_positions
+    """Load precomputed planes data with raw analyses."""
+    global planes, meta, analysis_data, analysis_offsets, vocab, num_positions
 
     print(f"Loading data from {data_path}...")
 
     planes = np.load(data_path / f"{split}_planes.npy")
     meta = np.load(data_path / f"{split}_meta.npy")
-    label_indices = np.load(data_path / f"{split}_label_indices.npy")
-    label_probs = np.load(data_path / f"{split}_label_probs.npy")
-    label_offsets = np.load(data_path / f"{split}_label_offsets.npy")
+    analysis_data = np.load(data_path / f"{split}_analysis_data.npy")
+    analysis_offsets = np.load(data_path / f"{split}_analysis_offsets.npy")
 
     vocab_path = data_path.parent / "vocab.npy"
     vocab = np.load(vocab_path)
@@ -121,13 +125,16 @@ def get_position(idx: int):
 
     fen = planes_to_fen(planes[idx], meta[idx])
 
-    start = label_offsets[idx]
-    end = label_offsets[idx + 1]
-    move_indices = label_indices[start:end]
-    probs = label_probs[start:end]
+    # Compute soft labels on the fly from raw analyses
+    a_start = analysis_offsets[idx]
+    a_end = analysis_offsets[idx + 1]
+    analyses = analysis_data[a_start:a_end]
+
+    is_white = meta[idx][0] == 1
+    labels = compute_soft_labels(analyses, is_white)
 
     moves = []
-    for move_idx, prob in zip(move_indices, probs):
+    for move_idx, prob in labels:
         from_sq, to_sq, promo = vocab[move_idx]
         uci = move_tuple_to_uci(from_sq, to_sq, promo)
         moves.append({

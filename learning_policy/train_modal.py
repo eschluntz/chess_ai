@@ -13,7 +13,7 @@ app = modal.App("chess-policy")
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .pip_install("torch", "wandb", "numpy")
+    .pip_install("torch", "wandb", "numpy", "einops")
     .add_local_file("data.py", "/root/data.py")
     .add_local_file("board_repr.py", "/root/board_repr.py")
     .add_local_file("mlp_model.py", "/root/mlp_model.py")
@@ -28,7 +28,7 @@ checkpoint_volume = modal.Volume.from_name(
 
 @app.function(
     image=image,
-    gpu="T4",
+    gpu="A10G",
     secrets=[modal.Secret.from_name("wandb-secret")],
     volumes={"/root/cache": data_volume, "/root/checkpoints": checkpoint_volume},
     timeout=86400,
@@ -39,7 +39,7 @@ def train(
     kernel_size: int = 3,
     batch_size: int = 1024,
     lr: float = 0.001,
-    max_seconds: int = 1200,
+    max_seconds: int = 14400,
     eval_interval_seconds: int = 30,
     run_name: str = None,
     checkpoint_dir: str = "checkpoints",

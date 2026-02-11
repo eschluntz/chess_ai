@@ -320,6 +320,7 @@ Same position, three different "correct" moves in the training data.
 
 # Future Planned Experiments
 
-- [ ] I need to confirm the best strategy for combining duplicate rows (soft labels vs throw out non-max)
+- [x] I need to confirm the best strategy for combining duplicate rows (soft labels vs throw out non-max)
+  - [ ] verify that i can get above 24% acc
 - [ ] measure how much noise is in my system with several runs of exactly the same settings
 - [ ] systems efficiency: increase vocab size to be a power of 2? learning rates / $ on different GPUs.
