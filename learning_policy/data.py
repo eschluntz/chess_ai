@@ -267,7 +267,7 @@ def get_dataloaders(batch_size: int, num_samples: str = "full", min_depth: int =
     # Split via shuffled indices so eval is sampled randomly across all positions
     train_planes = np.load(data_dir / "train_planes.npy", mmap_mode='r')
     n_total = len(train_planes)
-    eval_size = min(n_total // 100, 100_000)
+    eval_size = min(n_total // 100, 50_000)
 
     rng = np.random.default_rng(seed=42)
     all_indices = rng.permutation(n_total)

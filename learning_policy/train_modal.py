@@ -40,7 +40,7 @@ def train(
     batch_size: int = 1024,
     lr: float = 0.001,
     max_seconds: int = 14400,
-    eval_interval_seconds: int = 60,
+    eval_interval_seconds: int = 120,
     run_name: str = None,
     checkpoint_dir: str = "checkpoints",
     num_samples: str = "full",
@@ -208,8 +208,27 @@ def train(
                 yield epoch, batch
             epoch += 1
 
+    def prefetch(iterator, n=2):
+        """Pre-compute batches in a background thread to overlap CPU/GPU work."""
+        from threading import Thread
+        from queue import Queue
+
+        q = Queue(maxsize=n)
+
+        def fill():
+            for item in iterator:
+                q.put(item)
+            q.put(None)
+
+        Thread(target=fill, daemon=True).start()
+        while True:
+            item = q.get()
+            if item is None:
+                break
+            yield item
+
     model.train()
-    train_iter = infinite_batches(train_loader)
+    train_iter = prefetch(infinite_batches(train_loader))
 
     while True:
         elapsed_this_run = time.time() - start_time
@@ -345,23 +364,21 @@ def train(
 
 @app.function(image=image, timeout=86000)  # 23.5 hours for sweep coordination
 def sweep():
-    """Sweep min_depth filter: eval fixed at depth>=50, train varies."""
+    """Test prefetch speedup with 3 identical runs."""
     configs = [
-        {"min_depth": 0, "run_name": "depth_none"},
-        {"min_depth": 20, "run_name": "depth_20"},
-        {"min_depth": 30, "run_name": "depth_30"},
-        {"min_depth": 40, "run_name": "depth_40"},
-        {"min_depth": 50, "run_name": "depth_50"},
+        {"run_name": f"full-data-test-v4-fast-{i}"}
+        for i in range(3)
     ]
 
-    # Add common settings
     for cfg in configs:
-        cfg["eval_min_depth"] = 50
-        cfg["kernel_size"] = 3
-        cfg["num_layers"] = 14
         cfg["hidden_channels"] = 128
+        cfg["num_layers"] = 14
+        cfg["kernel_size"] = 3
         cfg["batch_size"] = 1024
-        cfg["max_seconds"] = 14400  # 4 hours
+        cfg["lr"] = 0.001
+        cfg["num_samples"] = "full"
+        cfg["min_depth"] = 0
+        cfg["max_seconds"] = 900  # 15 minutes
 
     print(f"Launching {len(configs)} parallel runs:")
     for cfg in configs:

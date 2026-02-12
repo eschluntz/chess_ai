@@ -414,12 +414,103 @@ Model: 20M wide (H=128, L=14, K=3), batch_size=1024, lr=0.001, A10G.
 
 Reached **35%+ eval accuracy** at ~7k steps with `min_depth=0`. However, this is **not directly comparable** to the previous 32.2% (depth_30 train, depth_50 eval) — the current eval includes shallow-analysis positions that are easier to predict. Apples-to-apples comparison with `--min-depth 30 --eval-min-depth 50` still needed.
 
+## 2026-02-11: Run-to-Run Variance (Identical Params)
+
+**Goal**: Measure how much noise exists between runs with identical settings.
+
+**Setup**:
+- 4 identical runs: `full-data-test-v4-{0,1,2,3}`
+- Model: 20M wide (H=128, L=14, K=3)
+- Batch size: 1024, LR: 0.001, AdamW
+- GPU: A10G, Training: 30 minutes per run
+- Data: Full 342M dataset, no depth filtering
+
+### Results
+
+| Run | Steps | Samples | Eval Acc | Deep Acc | Relative Speed |
+|-----|-------|---------|----------|----------|----------------|
+| v4-2 | 8,607 | 8.5M | 36.04% | 41.5% | 1.27x |
+| v4-3 | 7,138 | 7.1M | 35.59% | 40.4% | 1.05x |
+| v4-1 | 7,103 | 7.0M | 34.47% | 38.0% | 1.04x |
+| v4-0 | 6,803 | 6.7M | 33.93% | 38.6% | 1.00x |
+
+![Timing consistency across identical runs](img/timing_consistency.png)
+
+### Conclusions
+
+1. **Noise is throughput, not learning**: When plotted by step instead of wall time, all 4 runs trace nearly identical curves. The 2.1pp spread in final eval_acc is entirely explained by v4-2 completing 26% more steps than v4-0 in the same 30 minutes.
+
+2. **Root cause is I/O variance across Modal machines**: v4-2 spent 17% of time on data loading (mmap 9%) while v4-0 spent 28% (mmap 55%). Different A10G instances have different disk I/O performance.
+
+3. **Implications for experiment design**:
+   - Step-based or sample-based comparisons are reliable for single runs.
+   - Wall-clock comparisons are unreliable due to ~1.3x throughput variance.
+   - Experiments that change per-step compute (model size, batch size) need 3+ replicas per config to separate signal from infrastructure noise.
+   - Experiments that change data distribution (depth filtering) can use single runs if compared by step.
+
+## 2026-02-11: Depth Filtering on Full Dataset
+
+**Goal**: Compare training with different `min_depth` filters on the full 342M dataset.
+
+**Setup**:
+- Model: 20M wide (H=128, L=14, K=3)
+- Batch size: 1024, LR: 0.001, AdamW
+- GPU: A10G
+- Eval: 50k all-depth + 6.2k depth>=50 positions
+- Compared at 10k steps (~10.2M samples) for apples-to-apples
+
+| Config | Train Positions | Epoch % at 10k steps | Time to 10k steps | Eval Acc | Deep Acc |
+|--------|----------------|---------------------|--------------------|----------|----------|
+| depth_none | 342M | 3.0% | 43.2 min | 36.5% | 43.3% |
+| depth_30 | 73.5M | 14.1% | 43.2 min | 35.8% | 45.8% |
+| depth_40 | 35.8M | 28.4% | 41.2 min | 32.0% | 47.6% |
+| depth_50 | 21.1M | 49.0% | 32.1 min | 27.0% | 49.3% |
+
+![Eval acc vs deep acc tradeoff](img/eval_acc_vs_deep_acc.png)
+
+### Conclusions
+
+1. **Depth filtering trades breadth for quality**: Stricter filtering steadily improves `eval_deep_acc` (+6pp from none to depth_50) but hurts `eval_acc` on all positions (-9.5pp). The model learns to match deep Stockfish at the cost of being less calibrated to shallow/noisy positions.
+
+2. **depth_none has the most headroom**: With 97% of its data still unseen at 10k steps, depth_none can train much longer before overfitting. depth_50 is already halfway through its dataset.
+
+3. **Overfitting risk scales with filtering**: depth_50 is already at 49% of an epoch at 10k steps. The previous experiment (50M dataset) showed depth_50 losing 3.4pp from overfitting on multi-epoch. depth_none has essentially unlimited unique data.
+
+4. **Which metric matters?** If the goal is strong play (matching deep Stockfish), `eval_deep_acc` is the right metric and depth filtering helps per-step. But depth_none can compensate by training longer on more unique data without overfitting.
+
+## 2026-02-11: Prefetch Optimization
+
+**Goal**: Hide data loading latency by prefetching batches in a background thread.
+
+**Changes**:
+- Added background thread prefetch (queue size 2) to overlap CPU data loading with GPU training
+- Reduced eval set from 100k to 50k positions
+- Increased eval interval from 60s to 120s
+
+**Setup**: 3 identical runs (`full-data-test-v4-fast-{0,1,2}`), 15 minutes each, compared to original `full-data-test-v4-{0..3}` at 15 min mark.
+
+### Results
+
+| Metric               | Original (4 runs)      | Prefetch (3 runs)      | Change           |
+|----------------------|------------------------|------------------------|------------------|
+| Steps @ 15min        | 3,407 avg (3,390-4191) | 5,154 avg (4,960-5,274)| **+51%**         |
+| GPU utilization      | 62% avg (53-76%)       | 90% avg (85-93%)       | **+28pp**        |
+| Throughput variance  | ±380 steps (11%)       | ±170 steps (3%)        | **3.6x tighter** |
+
+### Conclusions
+
+1. **51% throughput increase**: Prefetching hides the mmap and soft label computation behind GPU work, keeping the GPU fed.
+
+2. **GPU utilization near ceiling**: 90% util means the remaining bottleneck is the eval pauses every 2 minutes plus unavoidable overhead. Little room for further data loading optimization.
+
+3. **Variance nearly eliminated**: With I/O no longer the bottleneck, machine-to-machine disk speed differences don't matter. Runs are now reproducible enough for single-run comparisons even on wall-clock time.
+
 # Future Planned Experiments
 
 - [x] ~~confirm the best strategy for combining duplicate rows (soft labels vs throw out non-max)~~
   - [x] ~~generate 50M and 250M datasets on modal~~
   - [x] ~~verify that i can get above 24% acc~~ → reached 32%
 - [x] ~~train on 250M dataset~~ → trained on full 844M (342M unique)
-- [ ] measure how much noise is in my system with several runs of exactly the same settings
+- [x] ~~measure how much noise is in my system with several runs of exactly the same settings~~ → throughput noise, not learning noise
 - [ ] compare full dataset with depth_30 filter against previous 50M depth_30 result
 - [ ] systems efficiency: increase vocab size to be a power of 2? learning rates / $ on different GPUs.
