@@ -45,7 +45,6 @@ def train(
     checkpoint_dir: str = "checkpoints",
     num_samples: str = "full",
     min_depth: int = 0,
-    eval_min_depth: int = None,
 ):
     import sys
 
@@ -77,8 +76,8 @@ def train(
     print("=" * 60)
 
     # Load data from precomputed features
-    train_loader, eval_loader, num_classes = get_dataloaders(
-        batch_size, num_samples=num_samples, min_depth=min_depth, eval_min_depth=eval_min_depth
+    train_loader, eval_loader, eval_loader_deep, num_classes = get_dataloaders(
+        batch_size, num_samples=num_samples, min_depth=min_depth
     )
     total_samples = train_loader.num_samples
     num_moves = num_classes
@@ -96,12 +95,12 @@ def train(
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0)
 
     @torch.no_grad()
-    def estimate_eval_loss():
+    def run_eval(loader):
         model.eval()
         losses = []
         correct = 0
         total = 0
-        for planes, meta, target in eval_loader:
+        for planes, meta, target in loader:
             planes, meta, target = planes.to(device), meta.to(device), target.to(device)
             logits = model(planes, meta)
             losses.append(criterion(logits, target).item())
@@ -109,8 +108,13 @@ def train(
             total += len(target)
         model.train()
         if total == 0:
-            return {"eval_loss": float("nan"), "eval_acc": float("nan")}
-        return {"eval_loss": sum(losses) / len(losses), "eval_acc": correct / total}
+            return float("nan"), float("nan")
+        return sum(losses) / len(losses), correct / total
+
+    def estimate_eval_loss():
+        eval_loss, eval_acc = run_eval(eval_loader)
+        _, deep_acc = run_eval(eval_loader_deep)
+        return {"eval_loss": eval_loss, "eval_acc": eval_acc, "eval_deep_acc": deep_acc}
 
     num_params = sum(p.numel() for p in model.parameters())
 
@@ -160,7 +164,7 @@ def train(
 
     print(f"[{run_name}] " + "-" * 80)
     print(
-        f"[{run_name}] {'Time':>6} | {'Epoch':>5} | {'Samples':>12} | {'Step':>7} | {'Loss':>7} | {'Train':>6} | {'Eval':>6}"
+        f"[{run_name}] {'Time':>6} | {'Epoch':>5} | {'Samples':>12} | {'Step':>7} | {'Loss':>7} | {'Train':>6} | {'Eval':>6} | {'Deep':>6}"
     )
     print(f"[{run_name}] " + "-" * 80)
 
@@ -288,10 +292,12 @@ def train(
             pct_eval = 100 * time_eval / time_total
 
             print(
-                f"[{run_name}] {total_elapsed:>5.0f}s | {epoch:>5} | {samples_seen:>12,} | {step:>7,} | {train_loss:>7.3f} | {train_acc:>5.1%} | {eval_metrics['eval_acc']:>5.1%} | "
-                f"data {pct_data:.0f}% xfer {pct_transfer:.0f}% fwd {pct_forward:.0f}% bwd {pct_backward:.0f}% opt {pct_optim:.0f}% eval {pct_eval:.0f}%"
+                f"[{run_name}] {total_elapsed:>5.0f}s | {epoch:>5} | {samples_seen:>12,} | {step:>7,} | {train_loss:>7.3f} | {train_acc:>5.1%} | {eval_metrics['eval_acc']:>5.1%} | {eval_metrics['eval_deep_acc']:>5.1%}"
             )
-            print(f"[{run_name}]   dataloader: {dl_breakdown}  eval: {time_eval:.1f}s")
+            print(
+                f"[{run_name}]   timing: data {pct_data:.0f}% fwd {pct_forward:.0f}% bwd {pct_backward:.0f}% eval {pct_eval:.0f}% | "
+                f"dataloader: {dl_breakdown} | eval: {time_eval:.1f}s"
+            )
 
             wandb.log(
                 {

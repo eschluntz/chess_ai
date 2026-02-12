@@ -4,7 +4,7 @@ CNN policy network model.
 
 import torch
 import torch.nn as nn
-from einops import pack, rearrange, reduce, repeat
+from einops import pack, repeat
 
 W, H = 8, 8
 

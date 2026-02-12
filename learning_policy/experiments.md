@@ -420,6 +420,6 @@ Reached **35%+ eval accuracy** at ~7k steps with `min_depth=0`. However, this is
   - [x] ~~generate 50M and 250M datasets on modal~~
   - [x] ~~verify that i can get above 24% acc~~ → reached 32%
 - [x] ~~train on 250M dataset~~ → trained on full 844M (342M unique)
-- [ ] compare full dataset with depth_30 filter against previous 50M depth_30 result
 - [ ] measure how much noise is in my system with several runs of exactly the same settings
+- [ ] compare full dataset with depth_30 filter against previous 50M depth_30 result
 - [ ] systems efficiency: increase vocab size to be a power of 2? learning rates / $ on different GPUs.

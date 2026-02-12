@@ -7,11 +7,13 @@ Learn a policy model to directly predict next moves from chess positions.
 | File                  | Description                                            |
 |-----------------------|--------------------------------------------------------|
 | `board_repr.py`       | Board representation: FEN↔planes conversion, PlanesToFlat encoder |
-| `precompute.py` | Precompute board planes + raw analyses from HuggingFace |
+| `build_vocab.py`      | Build move vocabulary from dataset                     |
+| `precompute.py`       | Sharded precompute pipeline (Modal): shard workers + concat |
 | `data.py`             | Data loading + soft label computation at train time    |
-| `mlp_model.py`        | Simple MLP policy network                              |
-| `train_modal.py`      | Training script (local or Modal)                       |
-| `test_board_repr.py`  | Unit tests for board representation                    |
+| `cnn_model.py`        | ResNet-style CNN policy network                        |
+| `mlp_model.py`        | Simple MLP policy network (baseline)                   |
+| `train_modal.py`      | Training script (Modal)                                |
+| `analysis/verify.py`  | Data integrity checks + depth/duplicate analysis (Modal) |
 | `interface/server.py` | Web UI to visualize model predictions                  |
 | `interface/data_server.py` | Web UI to explore training data                   |
 
@@ -33,23 +35,30 @@ can be changed at train time without re-running precompute.
 
 ## Usage
 
-**Precompute dataset:**
+**Precompute dataset (Modal):**
 ```bash
-python precompute.py --num-samples 1M    # -> cache/planes/1M/
-python precompute.py --num-samples 50M   # -> cache/planes/50M/
-python precompute.py --num-samples full  # -> cache/planes/full/
+modal run --detach precompute.py::precompute_sharded                          # full dataset, 17 shards
+modal run --detach precompute.py::precompute_sharded --num-samples 1M --num-shards 2  # small test
 ```
 
-**Run tests:**
+Shards are written to Modal volume `chess-policy-data`, final output to `chess-policy-output`.
+Re-runnable: completed shards are skipped on retry.
+
+**Train (Modal):**
 ```bash
-python -m pytest test_board_repr.py -v
-python board_repr.py  # visualize a FEN
+modal run --detach train_modal.py::train --max-seconds 3600
+modal run --detach train_modal.py::train --min-depth 30 --eval-min-depth 50 --max-seconds 14400
 ```
 
-**Explore training data:**
+**Verify data integrity:**
 ```bash
-python interface/data_server.py                    # default: cache/planes/1M
-python interface/data_server.py --data cache/planes/50M --port 5002
+modal run analysis/verify.py::verify_output
+modal run analysis/verify.py::check_depths
+```
+
+**Explore training data locally:**
+```bash
+python interface/data_server.py --data cache/planes/full --port 5001
 ```
 Then open http://localhost:5001. Arrow keys to navigate, R for random, hover arrows for probabilities.
 
@@ -60,15 +69,19 @@ Source: [Lichess/chess-position-evaluations](https://huggingface.co/datasets/Lic
 - Crowdsourced from user browsers running Stockfish on Lichess analysis board
 - Updated monthly, CC0 license
 
-| Sample count | Storage size | Precompute time |
-|--------------|--------------|-----------------|
-| 1M           | 140 MB       | ~30 sec         |
-| 50M          | 6.8 GB       | ~25 min         |
-| 844M (full)  | 115 GB       | ~8 hours        |
+| Sample count | Unique positions | Output size | Precompute time |
+|--------------|------------------|-------------|-----------------|
+| 1M           | 173k             | 0.2 GB      | ~2 min (Modal)  |
+| 844M (full)  | 342M             | 305 GB      | ~1.5 hours (17 shards on Modal) |
 
 **IMPORTANT NOTES ON DATASET! PAY ATTENTION TO THIS WHEN WRITING RELATED CODE**
 - The dataset is NOT uniformly distributed. There's distribution drift over time. Therefore to do accurate science it's very important that we shuffle the test/train split across whatever max data size we're working with.
 - I want to be able to do small tests locally, but larger runs will always be on Modal.
+
+**Modal volumes:**
+- `chess-policy-data`: HF cache + shard intermediate files (~400 GB). Used by precompute workers.
+- `chess-policy-output`: Final `train_*.npy` output + `vocab.npy` (~305 GB). Used by training.
+- Two volumes are needed because a single volume can't hold both shards and output simultaneously (~700 GB total).
 
 ### Dataset Structure and Soft Labels
 
@@ -85,7 +98,7 @@ The raw dataset has one row per (position, PV) pair:
 
 **Key insight: Many positions have multiple analyses with conflicting "best" moves.**
 
-Exploring the data with the analysis scripts and the data explorer UI shows ~90%+ of positions have multiple analyses, often at similar depths but recommending different moves. This motivates using soft labels instead of picking a single "correct" move.
+With the full dataset (2.47 analyses per position on average), 41.5% of positions have soft labels (2+ moves at max depth) and 58.5% have hard labels (single move). This motivates using soft labels instead of picking a single "correct" move.
 
 ### Analysis Sessions
 

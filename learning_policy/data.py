@@ -174,10 +174,20 @@ class SoftLabelDataset:
         self.indices = blocks.reshape(-1)
 
         if preload:
-            # Load planes/meta into memory so reads don't hit mmap
+            # Load all data into memory so reads don't hit mmap.
+            # Must remap analysis arrays too, since indices get reset to 0..N.
             t0 = time.perf_counter()
             self.planes = np.array(self.planes[self.indices])
             self.meta = np.array(self.meta[self.indices])
+            ad_parts = []
+            new_offsets = [0]
+            for idx in self.indices:
+                a_start = int(self.analysis_offsets[idx])
+                a_end = int(self.analysis_offsets[idx + 1])
+                ad_parts.append(self.analysis_data[a_start:a_end])
+                new_offsets.append(new_offsets[-1] + (a_end - a_start))
+            self.analysis_data = np.concatenate(ad_parts) if ad_parts else np.empty((0, 5), dtype=np.int32)
+            self.analysis_offsets = np.array(new_offsets, dtype=np.uint32)
             self.indices = np.arange(len(self.planes))
             print(f"  [{prefix}] preloaded ({self.planes.nbytes / 1e6:.0f} MB): {time.perf_counter() - t0:.1f}s", flush=True)
 
@@ -226,21 +236,16 @@ class SoftLabelDataset:
         return self.num_batches
 
 
-def get_dataloaders(batch_size: int, num_samples: str = "full", min_depth: int = 0, eval_min_depth: int = None):
+def get_dataloaders(batch_size: int, num_samples: str = "full", min_depth: int = 0, deep_eval_depth: int = 50):
     """Load precomputed data with raw analyses.
 
     Args:
         min_depth: Filter training positions to those with max analysis depth >= this value.
-        eval_min_depth: Filter eval positions separately. Defaults to min_depth if not set.
+        deep_eval_depth: Depth threshold for the deep eval loader.
 
     Returns:
-        train_loader: Iterator yielding (planes, meta, soft_target) batches
-        eval_loader: Iterator yielding (planes, meta, soft_target) batches
-        num_classes: Number of move classes (vocab size)
+        train_loader, eval_loader, eval_loader_deep, num_classes
     """
-    if eval_min_depth is None:
-        eval_min_depth = min_depth
-
     data_dir = CACHE_DIR / num_samples
 
     # Get num_classes from vocab
@@ -258,8 +263,6 @@ def get_dataloaders(batch_size: int, num_samples: str = "full", min_depth: int =
 
     if min_depth > 0:
         print(f"Train filter: min_depth >= {min_depth}")
-    if eval_min_depth > 0:
-        print(f"Eval filter: min_depth >= {eval_min_depth}")
 
     # Split via shuffled indices so eval is sampled randomly across all positions
     train_planes = np.load(data_dir / "train_planes.npy", mmap_mode='r')
@@ -274,10 +277,13 @@ def get_dataloaders(batch_size: int, num_samples: str = "full", min_depth: int =
     train_loader = SoftLabelDataset(data_dir, "train", batch_size, num_classes,
                                     min_depth=min_depth, indices=train_indices)
     eval_loader = SoftLabelDataset(data_dir, "train", batch_size, num_classes,
-                                   min_depth=eval_min_depth, indices=eval_indices, preload=True)
+                                   indices=eval_indices, preload=True)
+    eval_loader_deep = SoftLabelDataset(data_dir, "train", batch_size, num_classes,
+                                        min_depth=deep_eval_depth, indices=eval_indices, preload=True)
 
     print(f"Train: {train_loader.num_samples:,} positions ({train_loader.num_batches:,} batches)")
     print(f"Eval: {eval_loader.num_samples:,} positions ({eval_loader.num_batches:,} batches)")
+    print(f"Eval (depth>=50): {eval_loader_deep.num_samples:,} positions ({eval_loader_deep.num_batches:,} batches)")
     print(f"Vocab: {num_classes:,} unique moves")
 
-    return train_loader, eval_loader, num_classes
+    return train_loader, eval_loader, eval_loader_deep, num_classes
