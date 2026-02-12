@@ -129,38 +129,76 @@ class MoveVocab:
 class SoftLabelDataset:
     """Iterator that yields (planes, meta, soft_target) batches, computing labels from raw analyses."""
 
-    def __init__(self, data_dir: Path, prefix: str, batch_size: int, num_classes: int):
+    def __init__(self, data_dir: Path, prefix: str, batch_size: int, num_classes: int,
+                 min_depth: int = 0, indices: np.ndarray = None, preload: bool = False):
         self.batch_size = batch_size
         self.num_classes = num_classes
 
+        t0 = time.perf_counter()
         # Memory-map position arrays
         self.planes = np.load(data_dir / f"{prefix}_planes.npy", mmap_mode='r')
         self.meta = np.load(data_dir / f"{prefix}_meta.npy", mmap_mode='r')
+        print(f"  [{prefix}] mmap planes/meta: {time.perf_counter() - t0:.1f}s", flush=True)
 
+        t0 = time.perf_counter()
         # Load raw analyses
         self.analysis_data = np.load(data_dir / f"{prefix}_analysis_data.npy")
+        print(f"  [{prefix}] load analysis_data ({self.analysis_data.nbytes / 1e9:.1f} GB): {time.perf_counter() - t0:.1f}s", flush=True)
+        t0 = time.perf_counter()
         self.analysis_offsets = np.load(data_dir / f"{prefix}_analysis_offsets.npy")
+        print(f"  [{prefix}] load analysis_offsets ({self.analysis_offsets.nbytes / 1e9:.1f} GB): {time.perf_counter() - t0:.1f}s", flush=True)
 
-        self.num_samples = len(self.planes)
+        candidates = indices if indices is not None else np.arange(len(self.planes))
+
+        # Filter to positions where max analysis depth >= min_depth
+        if min_depth > 0:
+            depths = self.analysis_data[:, 1]  # depth is column 1
+            mask = np.array([
+                depths[self.analysis_offsets[i]:self.analysis_offsets[i + 1]].max()
+                if self.analysis_offsets[i] < self.analysis_offsets[i + 1] else 0
+                for i in candidates
+            ]) >= min_depth
+            candidates = candidates[mask]
+
+        self.indices = candidates
+        self.num_samples = len(self.indices)
         self.num_batches = self.num_samples // batch_size
+
+        # Block shuffle: shuffle blocks of contiguous positions so mmap reads
+        # stay sequential within each batch, while randomizing across blocks.
+        BLOCK = batch_size
+        rng = np.random.default_rng(seed=42)
+        n_blocks = len(self.indices) // BLOCK
+        blocks = self.indices[:n_blocks * BLOCK].reshape(n_blocks, BLOCK)
+        rng.shuffle(blocks)
+        self.indices = blocks.reshape(-1)
+
+        if preload:
+            # Load planes/meta into memory so reads don't hit mmap
+            t0 = time.perf_counter()
+            self.planes = np.array(self.planes[self.indices])
+            self.meta = np.array(self.meta[self.indices])
+            self.indices = np.arange(len(self.planes))
+            print(f"  [{prefix}] preloaded ({self.planes.nbytes / 1e6:.0f} MB): {time.perf_counter() - t0:.1f}s", flush=True)
 
     def __iter__(self):
         self.time_mmap = 0.0
         self.time_tensor = 0.0
         self.time_labels = 0.0
-
         for i in range(self.num_batches):
             start = i * self.batch_size
             end = start + self.batch_size
 
+            batch_indices = self.indices[start:end]
+
             t0 = time.perf_counter()
-            planes = self.planes[start:end]
-            meta = self.meta[start:end]
+            planes = self.planes[batch_indices]
+            meta = self.meta[batch_indices]
             self.time_mmap += time.perf_counter() - t0
 
             t0 = time.perf_counter()
-            planes_t = torch.as_tensor(planes)
-            meta_t = torch.as_tensor(meta)
+            planes_t = torch.as_tensor(np.array(planes))
+            meta_t = torch.as_tensor(np.array(meta))
             self.time_tensor += time.perf_counter() - t0
 
             # Compute soft labels from raw analyses
@@ -169,7 +207,7 @@ class SoftLabelDataset:
             soft_target = torch.zeros(self.batch_size, self.num_classes)
 
             for j in range(self.batch_size):
-                pos_idx = start + j
+                pos_idx = batch_indices[j]
                 a_start = self.analysis_offsets[pos_idx]
                 a_end = self.analysis_offsets[pos_idx + 1]
                 analyses = self.analysis_data[a_start:a_end]
@@ -188,14 +226,21 @@ class SoftLabelDataset:
         return self.num_batches
 
 
-def get_dataloaders(batch_size: int, num_samples: str = "50M"):
+def get_dataloaders(batch_size: int, num_samples: str = "full", min_depth: int = 0, eval_min_depth: int = None):
     """Load precomputed data with raw analyses.
+
+    Args:
+        min_depth: Filter training positions to those with max analysis depth >= this value.
+        eval_min_depth: Filter eval positions separately. Defaults to min_depth if not set.
 
     Returns:
         train_loader: Iterator yielding (planes, meta, soft_target) batches
         eval_loader: Iterator yielding (planes, meta, soft_target) batches
         num_classes: Number of move classes (vocab size)
     """
+    if eval_min_depth is None:
+        eval_min_depth = min_depth
+
     data_dir = CACHE_DIR / num_samples
 
     # Get num_classes from vocab
@@ -211,8 +256,25 @@ def get_dataloaders(batch_size: int, num_samples: str = "50M"):
         print(f"  (from {stats['raw_samples']:,} raw samples, {stats['dedup_ratio']:.2f}x dedup)")
         print(f"  Avg analyses per position: {stats['avg_analyses_per_position']:.2f}")
 
-    train_loader = SoftLabelDataset(data_dir, "train", batch_size, num_classes)
-    eval_loader = SoftLabelDataset(data_dir, "eval", batch_size, num_classes)
+    if min_depth > 0:
+        print(f"Train filter: min_depth >= {min_depth}")
+    if eval_min_depth > 0:
+        print(f"Eval filter: min_depth >= {eval_min_depth}")
+
+    # Split via shuffled indices so eval is sampled randomly across all positions
+    train_planes = np.load(data_dir / "train_planes.npy", mmap_mode='r')
+    n_total = len(train_planes)
+    eval_size = min(n_total // 100, 100_000)
+
+    rng = np.random.default_rng(seed=42)
+    all_indices = rng.permutation(n_total)
+    eval_indices = np.sort(all_indices[:eval_size])
+    train_indices = np.sort(all_indices[eval_size:])
+
+    train_loader = SoftLabelDataset(data_dir, "train", batch_size, num_classes,
+                                    min_depth=min_depth, indices=train_indices)
+    eval_loader = SoftLabelDataset(data_dir, "train", batch_size, num_classes,
+                                   min_depth=eval_min_depth, indices=eval_indices, preload=True)
 
     print(f"Train: {train_loader.num_samples:,} positions ({train_loader.num_batches:,} batches)")
     print(f"Eval: {eval_loader.num_samples:,} positions ({eval_loader.num_batches:,} batches)")

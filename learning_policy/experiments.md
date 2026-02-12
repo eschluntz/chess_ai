@@ -318,9 +318,108 @@ Same position, three different "correct" moves in the training data.
 
 **Next steps**: Precompute deduplicated dataset with soft labels (depth-weighted move distributions) to remove label noise ceiling.
 
+## 2026-02-10: Soft Labels + Depth Filtering
+
+**Goal**: Break the 24-25% eval accuracy ceiling by improving label quality.
+
+**Background**: The previous scaling experiment (2026-01-18) found all models plateau at ~24-25% regardless of capacity. This was attributed to label noise from conflicting labels (same FEN, different best moves). However, investigation revealed the original duplicate analysis was misleading — it used the first 100k *sequential* rows (7.18x dedup ratio, 78% conflicting), but the actual 50M *random* training sample had only 1.09x dedup ratio. ~92% of training positions had a single analysis, so conflicting labels couldn't explain the ceiling.
+
+**Revised hypothesis**: The ceiling is caused by low-quality labels from shallow Stockfish analyses, not from duplicate positions.
+
+### Setup
+
+**Data pipeline changes**:
+- Store raw analysis data (move, depth, knodes, cp, mate) per position
+- Compute soft labels at train time: keep only max-depth analyses, Boltzmann-weight cp scores (temperature=50cp)
+- Added `min_depth` filter to discard positions where the deepest analysis is below a threshold
+
+**Experiment**: Sweep over `min_depth` training filter (0, 20, 30, 40, 50), with eval fixed at `min_depth >= 50` for consistent comparison.
+
+- Model: 20M wide (H=128, L=14, K=3)
+- Batch size: 1024, LR: 0.001, AdamW
+- GPU: A10G, Training: 4 hours per config
+- Data: 50M precomputed positions, eval carved from tail of train set
+
+### Results
+
+| Config     | Train Min Depth | Train Positions | Max Eval Acc | Final Eval Acc | Overfit Drop | Epochs |
+|------------|-----------------|-----------------|--------------|----------------|--------------|--------|
+| depth_none | 0               | 45,328,282      | 29.59%       | 29.37%         | -0.22%       | 0.3    |
+| depth_20   | 20              | 39,385,627      | 30.05%       | 29.83%         | -0.21%       | 0.4    |
+| depth_30   | 30              | 7,552,762       | **32.20%**   | 32.20%         | 0.00%        | 1.7    |
+| depth_40   | 40              | 3,755,552       | 31.13%       | 29.23%         | -1.91%       | 3.8    |
+| depth_50   | 50              | 2,135,982       | 28.98%       | 25.61%         | -3.37%       | 6.6    |
+
+![Depth filtering eval accuracy](img/depth_filtering_eval_acc.png)
+
+### Conclusions
+
+1. **Ceiling broken**: 32.2% eval accuracy vs the previous 24-25% — an 8 percentage point improvement from data quality alone, with no architecture changes.
+
+2. **Depth 30 is the sweet spot**: Aggressive filtering (depth >= 40, 50) produces cleaner labels but too little data, leading to overfitting. depth_50 lost 3.4% from its peak. No filtering (depth_none) has the most data but noisier labels. depth_30 balances quality and quantity — 7.6M positions, enough for ~1.7 epochs without overfitting.
+
+3. **Overfitting is the limiting factor, not label quality**: The best runs (depth_30, depth_40) peak and then decline as they multi-epoch. More unique high-quality positions should push accuracy further.
+
+4. **Duplicate analysis was a red herring**: The original 78% conflicting labels finding was an artifact of sequential sampling from clustered data. With random sampling, deduplication barely matters (1.09x ratio). The real issue was shallow analysis depth, not conflicting labels.
+
+**Next steps**: Scale to 250M+ dataset to get more depth >= 30 positions and delay the multi-epoch plateau.
+
+## 2026-02-11: Full Dataset Sharded Precompute
+
+**Goal**: Process the entire 844M-row Lichess dataset to get maximum training data.
+
+**Problem**: The single-machine precompute pipeline hit memory limits at 250M+ rows — grouping all rows by FEN in a single Python dict consumed 100GB+.
+
+### Sharded Pipeline
+
+Split the work across 17 parallel Modal workers (one per ~50M rows). Each worker groups by FEN locally, converts to planes, and saves its chunk. A coordinator concatenates the results.
+
+- **Input**: 844,812,067 raw rows across 17 shards
+- **Output**: 342,059,890 unique positions (2.47x dedup)
+- **Cross-shard duplicates**: 212 out of 342M (0.00006%) — negligible
+- **Output size**: 304.57 GB on a separate Modal volume (`chess-policy-output`)
+
+### Dataset Analysis
+
+Sampled 1M positions from the full dataset:
+
+| Metric | Value |
+|--------|-------|
+| Analyses per position | mean=2.47, median=1 |
+| Max depth per position | mean=28.7, median=24 |
+| Positions with depth >= 20 | 93.1% |
+| Positions with depth >= 30 | 21.6% (~74M positions) |
+| Positions with depth >= 50 | 6.1% (~21M positions) |
+| Hard labels (1 move at max depth) | 58.5% |
+| Soft labels (2+ moves at max depth) | 41.5% |
+
+Compared to the old 50M random sample (1.09x dedup, ~92% hard labels), the full dataset has significantly better label quality: higher max depths from aggregating multiple analyses, and 7x more soft labels.
+
+### Data Integrity
+
+- Zero all-zero boards, zero bad turn values, zero unflushed mmap gaps
+- Analysis offsets monotonic and consistent
+- Depth range: 1-245, move indices within vocab range
+
+### Infrastructure Notes
+
+- **Two-volume architecture**: Shard data + HF cache on `chess-policy-data` (~400 GB), final output on `chess-policy-output` (~305 GB). Single volume couldn't hold both simultaneously during concat.
+- **Shard workers**: 64 GB memory, 8 CPU, `retries=3` for preemption handling. Marker files enable re-runnable coordinator.
+- **Concat**: 64 GB memory, 1 TB ephemeral disk. Reads shards via `mmap_mode='r'` from data volume, writes output to output volume.
+- **Data loader changes**: Block shuffle (shuffle blocks of `batch_size` contiguous positions) for sequential mmap reads. Eval set preloaded into memory (100k positions, ~84 MB). Train/eval split via shuffled permutation in the data loader instead of at precompute time.
+
+### Initial Training (no depth filtering)
+
+Model: 20M wide (H=128, L=14, K=3), batch_size=1024, lr=0.001, A10G.
+
+Reached **35%+ eval accuracy** at ~7k steps with `min_depth=0`. However, this is **not directly comparable** to the previous 32.2% (depth_30 train, depth_50 eval) — the current eval includes shallow-analysis positions that are easier to predict. Apples-to-apples comparison with `--min-depth 30 --eval-min-depth 50` still needed.
+
 # Future Planned Experiments
 
-- [x] I need to confirm the best strategy for combining duplicate rows (soft labels vs throw out non-max)
-  - [ ] verify that i can get above 24% acc
+- [x] ~~confirm the best strategy for combining duplicate rows (soft labels vs throw out non-max)~~
+  - [x] ~~generate 50M and 250M datasets on modal~~
+  - [x] ~~verify that i can get above 24% acc~~ → reached 32%
+- [x] ~~train on 250M dataset~~ → trained on full 844M (342M unique)
+- [ ] compare full dataset with depth_30 filter against previous 50M depth_30 result
 - [ ] measure how much noise is in my system with several runs of exactly the same settings
 - [ ] systems efficiency: increase vocab size to be a power of 2? learning rates / $ on different GPUs.

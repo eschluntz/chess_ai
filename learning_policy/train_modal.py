@@ -20,7 +20,7 @@ image = (
     .add_local_file("cnn_model.py", "/root/cnn_model.py")
 )
 
-data_volume = modal.Volume.from_name("chess-policy-data", create_if_missing=True)
+data_volume = modal.Volume.from_name("chess-policy-output", create_if_missing=True)
 checkpoint_volume = modal.Volume.from_name(
     "chess-policy-checkpoints", create_if_missing=True
 )
@@ -40,10 +40,12 @@ def train(
     batch_size: int = 1024,
     lr: float = 0.001,
     max_seconds: int = 14400,
-    eval_interval_seconds: int = 30,
+    eval_interval_seconds: int = 60,
     run_name: str = None,
     checkpoint_dir: str = "checkpoints",
-    num_samples: str = "50M",
+    num_samples: str = "full",
+    min_depth: int = 0,
+    eval_min_depth: int = None,
 ):
     import sys
 
@@ -76,7 +78,7 @@ def train(
 
     # Load data from precomputed features
     train_loader, eval_loader, num_classes = get_dataloaders(
-        batch_size, num_samples=num_samples
+        batch_size, num_samples=num_samples, min_depth=min_depth, eval_min_depth=eval_min_depth
     )
     total_samples = train_loader.num_samples
     num_moves = num_classes
@@ -283,11 +285,13 @@ def train(
             else:
                 dl_breakdown = ""
 
+            pct_eval = 100 * time_eval / time_total
+
             print(
                 f"[{run_name}] {total_elapsed:>5.0f}s | {epoch:>5} | {samples_seen:>12,} | {step:>7,} | {train_loss:>7.3f} | {train_acc:>5.1%} | {eval_metrics['eval_acc']:>5.1%} | "
-                f"data {pct_data:.0f}% xfer {pct_transfer:.0f}% fwd {pct_forward:.0f}% bwd {pct_backward:.0f}% opt {pct_optim:.0f}%"
+                f"data {pct_data:.0f}% xfer {pct_transfer:.0f}% fwd {pct_forward:.0f}% bwd {pct_backward:.0f}% opt {pct_optim:.0f}% eval {pct_eval:.0f}%"
             )
-            print(f"[{run_name}]   dataloader: {dl_breakdown}")
+            print(f"[{run_name}]   dataloader: {dl_breakdown}  eval: {time_eval:.1f}s")
 
             wandb.log(
                 {
@@ -335,24 +339,23 @@ def train(
 
 @app.function(image=image, timeout=86000)  # 23.5 hours for sweep coordination
 def sweep():
-    """24hr scaling sweep: 10M to 100M params on A10 GPU."""
-    # K=3, L=14 fixed (wide architecture from previous sweeps)
-    # Scale via hidden_channels to hit param targets
-    # Params ≈ 126,000*H + 252*H²
+    """Sweep min_depth filter: eval fixed at depth>=50, train varies."""
     configs = [
-        {"hidden_channels": 72, "run_name": "scale_10M"},  # ~10M
-        {"hidden_channels": 128, "run_name": "scale_20M"},  # ~20M
-        {"hidden_channels": 176, "run_name": "scale_30M"},  # ~30M
-        {"hidden_channels": 264, "run_name": "scale_50M"},  # ~51M
-        {"hidden_channels": 432, "run_name": "scale_100M"},  # ~101M
+        {"min_depth": 0, "run_name": "depth_none"},
+        {"min_depth": 20, "run_name": "depth_20"},
+        {"min_depth": 30, "run_name": "depth_30"},
+        {"min_depth": 40, "run_name": "depth_40"},
+        {"min_depth": 50, "run_name": "depth_50"},
     ]
 
     # Add common settings
     for cfg in configs:
+        cfg["eval_min_depth"] = 50
         cfg["kernel_size"] = 3
         cfg["num_layers"] = 14
+        cfg["hidden_channels"] = 128
         cfg["batch_size"] = 1024
-        cfg["max_seconds"] = 84600  # 23.5 hours (buffer for Modal's 24hr limit)
+        cfg["max_seconds"] = 14400  # 4 hours
 
     print(f"Launching {len(configs)} parallel runs:")
     for cfg in configs:

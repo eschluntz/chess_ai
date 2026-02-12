@@ -1,23 +1,21 @@
 """
-Precompute chess dataset: board planes + raw Stockfish analyses per position.
+Sharded precompute pipeline for the Lichess chess dataset.
 
-Groups positions by FEN and stores all analysis rows. Label computation
-(soft labels, deepest-only, etc.) happens at train time in data.py.
+Splits the 844M-row dataset across parallel Modal workers, each grouping
+by FEN locally and converting to board planes. A coordinator concatenates
+the results into a single output on a separate volume.
 
-Storage format:
-    planes.npy:           (N, 13, 8, 8) uint8 - 12 piece planes + en_passant
-    meta.npy:             (N, 5) int8 - [turn, K, Q, k, q]
-    analysis_data.npy:    (total_analyses, 5) int32 - [move_idx, depth, knodes, cp_or_val, is_mate]
-    analysis_offsets.npy: (N + 1,) uint32 - position boundaries
+Storage format (per train_*.npy):
+    planes:           (N, 13, 8, 8) uint8 - 12 piece planes + en_passant
+    meta:             (N, 5) int8 - [turn, K, Q, k, q]
+    analysis_data:    (total_analyses, 5) int32 - [move_idx, depth, knodes, cp_or_val, is_mate]
+    analysis_offsets: (N + 1,) uint32 - position boundaries
 
 Usage:
-    python precompute.py --num-samples 1M
-    modal run --detach precompute.py::precompute_modal --num-samples 50M
+    modal run --detach precompute.py::precompute_sharded
+    modal run --detach precompute.py::precompute_sharded --num-samples 1M --num-shards 2
 """
 
-import pickle
-import shutil
-import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -34,8 +32,21 @@ image = (
 )
 
 data_volume = modal.Volume.from_name("chess-policy-data", create_if_missing=True)
+output_volume = modal.Volume.from_name("chess-policy-output", create_if_missing=True)
 
-STREAMING_THRESHOLD = 5_000_000
+CHUNK_SIZE = 50_000
+
+
+def _convert_fen_chunk(fen_chunk):
+    """Convert a chunk of FENs to planes and meta arrays. Runs in worker process."""
+    from board_repr import fen_to_planes
+
+    n = len(fen_chunk)
+    planes = np.empty((n, 13, 8, 8), dtype=np.uint8)
+    meta = np.empty((n, 5), dtype=np.int8)
+    for i, fen in enumerate(fen_chunk):
+        planes[i], meta[i] = fen_to_planes(fen)
+    return planes, meta
 
 
 def format_count(n: int) -> str:
@@ -59,229 +70,321 @@ def parse_num_samples(ns: str) -> int | str:
     return int(ns)
 
 
-def _precompute(num_samples: str | int, output_dir: Path, eval_frac: float = 0.0002, volume=None):
-    """Core precompute logic: board planes + raw analyses."""
+
+@app.function(
+    image=image,
+    volumes={"/root/cache": data_volume},
+    timeout=86400,
+    memory=64000,
+    cpu=8,
+    retries=modal.Retries(max_retries=3, backoff_coefficient=1.0, initial_delay=10.0),
+)
+def precompute_shard(shard_idx: int, num_shards: int, num_samples: str = "full"):
+    """Process one shard: group by FEN, convert to planes, save to volume."""
+    import os
+    import sys
+    from multiprocessing import Pool
+
+    sys.path.insert(0, "/root")
+    os.environ["HF_HOME"] = "/root/cache/hf"
+
+    from board_repr import uci_to_move_tuple
     from datasets import load_dataset
 
-    from board_repr import fen_to_planes, uci_to_move_tuple
-
     parsed = parse_num_samples(num_samples) if isinstance(num_samples, str) else num_samples
-    use_full = parsed == "full"
+    folder_name = "full" if parsed == "full" else format_count(parsed)
+    output_dir = Path(f"/root/cache/planes/{folder_name}")
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    if use_full:
-        folder_name = "full"
-    else:
-        num_samples = parsed
-        folder_name = format_count(num_samples)
+    marker = output_dir / f"shard_{shard_idx}_done"
+    data_volume.reload()
+    if marker.exists():
+        print(f"Shard {shard_idx} already done, skipping")
+        return
 
-    checkpoint_dir = output_dir / folder_name / "_checkpoint"
-    fen_checkpoint = checkpoint_dir / "fen_analyses.pkl"
+    # Load dataset (HF caches on volume)
+    print(f"Shard {shard_idx}/{num_shards}: Loading dataset...")
+    ds = load_dataset("Lichess/chess-position-evaluations", split="train")
+    total_ds = len(ds)
+    total_rows = total_ds if parsed == "full" else min(parsed, total_ds)
+    data_volume.commit()
 
-    # Phase 1: group by FEN (or resume from checkpoint)
-    if fen_checkpoint.exists():
-        print(f"Resuming from phase 1 checkpoint...")
-        with open(fen_checkpoint, 'rb') as f:
-            checkpoint = pickle.load(f)
-        fen_analyses = checkpoint['fen_analyses']
-        num_samples = checkpoint['num_samples']
-        n_unique = len(fen_analyses)
-        print(f"Loaded {n_unique:,} unique positions ({num_samples:,} raw samples)")
-    else:
-        if use_full:
-            print("Loading full dataset...")
-            ds = load_dataset("Lichess/chess-position-evaluations", split="train")
-            num_samples = len(ds)
-        elif parsed < STREAMING_THRESHOLD:
-            num_samples = parsed
-            print(f"Loading dataset (streaming {num_samples:,} samples)...")
-            ds = load_dataset("Lichess/chess-position-evaluations", split="train", streaming=True)
-        else:
-            num_samples = parsed
-            print(f"Loading dataset ({num_samples:,} samples)...")
-            ds = load_dataset("Lichess/chess-position-evaluations", split="train")
-            total = len(ds)
-            if num_samples < total:
-                rng = np.random.default_rng(seed=42)
-                indices = rng.choice(total, size=num_samples, replace=False)
-                indices = np.sort(indices)
-                ds = ds.select(indices)
+    # Compute row range
+    shard_size = (total_rows + num_shards - 1) // num_shards
+    start = shard_idx * shard_size
+    end = min(start + shard_size, total_rows)
+    num_rows = end - start
 
-        # First pass: group by FEN (batched for speed, tuples for memory)
-        print("Grouping by FEN...")
-        fen_analyses = defaultdict(list)
+    if num_rows <= 0:
+        marker.write_text("0,0")
+        data_volume.commit()
+        return
 
-        t0 = time.perf_counter()
-        batch_size = 10000
-        rows_processed = 0
+    print(f"Shard {shard_idx}: rows {start:,} to {end:,} ({num_rows:,} rows)")
+    ds_shard = ds.select(range(start, end))
 
-        for batch in tqdm(ds.iter(batch_size=batch_size), total=(num_samples + batch_size - 1) // batch_size):
-            fens = batch["fen"]
-            lines = batch["line"]
-            depths = batch["depth"]
-            knodess = batch["knodes"]
-            cps = batch["cp"]
-            mates = batch["mate"]
+    # Group by FEN
+    print(f"Shard {shard_idx}: Grouping by FEN...")
+    fen_analyses = defaultdict(list)
+    batch_size = 10000
 
-            for i in range(len(fens)):
-                if rows_processed >= num_samples:
-                    break
-                rows_processed += 1
+    for batch in tqdm(
+        ds_shard.iter(batch_size=batch_size),
+        total=(num_rows + batch_size - 1) // batch_size,
+    ):
+        fens = batch["fen"]
+        lines_batch = batch["line"]
+        depths = batch["depth"]
+        knodess = batch["knodes"]
+        cps = batch["cp"]
+        mates = batch["mate"]
 
-                line = lines[i]
-                if not line:
-                    continue
-
-                fen_analyses[fens[i]].append((
-                    line.partition(' ')[0],
+        for i in range(len(fens)):
+            line = lines_batch[i]
+            if not line:
+                continue
+            fen_analyses[fens[i]].append(
+                (
+                    line.partition(" ")[0],
                     depths[i] or 1,
                     knodess[i] or 0,
                     cps[i],
                     mates[i],
-                ))
+                )
+            )
 
-            if rows_processed >= num_samples:
-                break
+    n_unique = len(fen_analyses)
+    print(
+        f"Shard {shard_idx}: {num_rows:,} rows -> {n_unique:,} unique "
+        f"(dedup {num_rows / n_unique:.2f}x)"
+    )
 
-        n_unique = len(fen_analyses)
-        elapsed = time.perf_counter() - t0
-        print(f"Grouped {num_samples:,} rows into {n_unique:,} unique positions in {elapsed:.1f}s")
-        print(f"Dedup ratio: {num_samples / n_unique:.2f}x")
-
-        # Checkpoint phase 1 so preemption doesn't lose this work
-        print("Saving phase 1 checkpoint...")
-        checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        with open(fen_checkpoint, 'wb') as f:
-            pickle.dump({'fen_analyses': dict(fen_analyses), 'num_samples': num_samples}, f)
-        if volume:
-            volume.commit()
-        print("Phase 1 checkpoint saved.")
-
-    # Load existing vocab
-    vocab_path = Path(__file__).parent / "cache" / "planes" / "vocab.npy"
-    if not vocab_path.exists():
-        raise FileNotFoundError(f"Vocab not found at {vocab_path}. Run build_vocab.py first.")
-    vocab_moves = np.load(vocab_path)
+    # Load vocab
+    vocab_moves = np.load(Path("/root/cache/planes/vocab.npy"))
     move_to_idx = {tuple(m): i for i, m in enumerate(vocab_moves)}
-    print(f"Vocab size: {len(move_to_idx)}")
 
-    # Second pass: convert boards and store raw analyses
-    print("Converting boards and storing raw analyses...")
+    # Convert FENs to planes (parallel)
+    fens_list = list(fen_analyses.keys())
+    planes = np.empty((n_unique, 13, 8, 8), dtype=np.uint8)
+    meta_arr = np.empty((n_unique, 5), dtype=np.int8)
 
-    planes = np.zeros((n_unique, 13, 8, 8), dtype=np.uint8)
-    meta = np.zeros((n_unique, 5), dtype=np.int8)
+    chunks = [fens_list[i : i + CHUNK_SIZE] for i in range(0, len(fens_list), CHUNK_SIZE)]
+    num_workers = os.cpu_count()
+    print(f"Shard {shard_idx}: Converting {n_unique:,} positions with {num_workers} workers...")
 
-    # Raw analysis storage: [move_idx, depth, knodes, cp_or_val, is_mate]
+    with Pool(num_workers) as pool:
+        offset = 0
+        for chunk_planes, chunk_meta in tqdm(
+            pool.imap(_convert_fen_chunk, chunks), total=len(chunks)
+        ):
+            sz = len(chunk_planes)
+            planes[offset : offset + sz] = chunk_planes
+            meta_arr[offset : offset + sz] = chunk_meta
+            offset += sz
+
+    # Build analysis arrays
+    print(f"Shard {shard_idx}: Building analysis arrays...")
     all_analyses = []
-    offsets = [0]
+    offsets_list = [0]
+    skipped = 0
 
-    fens = list(fen_analyses.keys())
-    rng = np.random.default_rng(seed=43)
-    rng.shuffle(fens)
-
-    skipped_moves = 0
-
-    for i, fen in enumerate(tqdm(fens)):
-        p, m = fen_to_planes(fen)
-        planes[i] = p
-        meta[i] = m
-
+    for fen in fens_list:
         for move_uci, depth, knodes, cp, mate in fen_analyses[fen]:
             move = uci_to_move_tuple(move_uci)
             idx = move_to_idx.get(move)
             if idx is None:
-                skipped_moves += 1
+                skipped += 1
                 continue
-
             if mate is not None:
                 all_analyses.append((idx, depth, knodes, mate, 1))
             elif cp is not None:
                 all_analyses.append((idx, depth, knodes, cp, 0))
             else:
-                skipped_moves += 1
+                skipped += 1
+        offsets_list.append(len(all_analyses))
 
-        offsets.append(len(all_analyses))
+    analysis_data = np.array(all_analyses, dtype=np.int32).reshape(-1, 5)
+    analysis_offsets = np.array(offsets_list, dtype=np.uint32)
 
-    analysis_data = np.array(all_analyses, dtype=np.int32)
-    analysis_offsets = np.array(offsets, dtype=np.uint32)
+    print(f"Shard {shard_idx}: {len(analysis_data):,} analyses, {skipped:,} skipped")
 
-    total_analyses = len(analysis_data)
-    print(f"Total analyses: {total_analyses:,} ({skipped_moves:,} skipped)")
-    print(f"Average analyses per position: {total_analyses / n_unique:.2f}")
+    # Save shard output
+    np.save(output_dir / f"shard_{shard_idx}_planes.npy", planes)
+    np.save(output_dir / f"shard_{shard_idx}_meta.npy", meta_arr)
+    np.save(output_dir / f"shard_{shard_idx}_analysis_data.npy", analysis_data)
+    np.save(output_dir / f"shard_{shard_idx}_analysis_offsets.npy", analysis_offsets)
 
-    # Split train/eval (minimum 2048 eval samples so we get at least a couple batches)
-    eval_size = max(int(n_unique * eval_frac), min(2048, n_unique // 2))
-    train_size = n_unique - eval_size
-    print(f"Train: {train_size:,}, Eval: {eval_size:,}")
+    marker.write_text(f"{n_unique},{num_rows}")
+    data_volume.commit()
+    print(f"Shard {shard_idx}: Done! ({n_unique:,} positions saved)")
 
-    # Create output directory
-    output_dir = output_dir / folder_name
-    output_dir.mkdir(parents=True, exist_ok=True)
 
-    def save_split(prefix: str, start: int, end: int):
-        np.save(output_dir / f"{prefix}_planes.npy", planes[start:end])
-        np.save(output_dir / f"{prefix}_meta.npy", meta[start:end])
+@app.function(
+    image=image,
+    volumes={"/root/cache": data_volume, "/root/output": output_volume},
+    timeout=86400,
+    memory=64000,
+    cpu=4,
+    ephemeral_disk=1_048_576,
+)
+def concat_shards(num_shards: int, folder_name: str = "full"):
+    """Concatenate shard outputs into a single train set.
 
-        a_start = analysis_offsets[start]
-        a_end = analysis_offsets[end]
-        np.save(output_dir / f"{prefix}_analysis_data.npy", analysis_data[a_start:a_end])
-        new_offsets = analysis_offsets[start:end + 1] - a_start
-        np.save(output_dir / f"{prefix}_analysis_offsets.npy", new_offsets)
+    Reads shards from data_volume, writes output to output_volume.
+    Uses separate volumes so we never need to hold both (~300 GB each)
+    on the same volume simultaneously.
+    """
+    import os
+    import shutil
 
-    print("Saving eval...")
-    save_split("eval", 0, eval_size)
+    shard_dir = Path(f"/root/cache/planes/{folder_name}")
+    out_dir = Path(f"/root/output/planes/{folder_name}")
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Saving train...")
-    save_split("train", eval_size, n_unique)
+    # Copy vocab to output volume so training only needs one volume
+    shutil.copy2("/root/cache/planes/vocab.npy", "/root/output/planes/vocab.npy")
+
+    # Read shard sizes from markers (format: "unique_count,raw_count")
+    shard_sizes = []
+    total_raw = 0
+    for i in range(num_shards):
+        parts = (shard_dir / f"shard_{i}_done").read_text().split(",")
+        shard_sizes.append(int(parts[0]))
+        total_raw += int(parts[1])
+    total = sum(shard_sizes)
+    print(f"Total: {total:,} positions across {num_shards} shards ({total_raw:,} raw rows)")
+
+    # Create mmap'd output on output volume
+    out_planes = np.lib.format.open_memmap(
+        str(out_dir / "train_planes.npy"),
+        mode="w+", dtype=np.uint8, shape=(total, 13, 8, 8),
+    )
+    out_meta = np.lib.format.open_memmap(
+        str(out_dir / "train_meta.npy"),
+        mode="w+", dtype=np.int8, shape=(total, 5),
+    )
+
+    # Process shards one at a time (read from data volume, write to output volume)
+    cursor = 0
+    total_analyses = 0
+
+    for s in range(num_shards):
+        print(f"Processing shard {s}/{num_shards}...")
+        s_planes = np.load(shard_dir / f"shard_{s}_planes.npy", mmap_mode="r")
+        s_meta = np.load(shard_dir / f"shard_{s}_meta.npy", mmap_mode="r")
+        s_ad = np.load(shard_dir / f"shard_{s}_analysis_data.npy", mmap_mode="r")
+        s_ao = np.load(shard_dir / f"shard_{s}_analysis_offsets.npy", mmap_mode="r")
+        n = shard_sizes[s]
+
+        out_planes[cursor : cursor + n] = s_planes
+        out_meta[cursor : cursor + n] = s_meta
+        cursor += n
+
+        # Save per-shard analysis to temp files on output volume
+        np.save(out_dir / f"_tmp_ad_{s}.npy", s_ad)
+        np.save(out_dir / f"_tmp_ao_{s}.npy", s_ao)
+        total_analyses += len(s_ad)
+
+        del s_planes, s_meta, s_ad, s_ao
+
+    out_planes.flush()
+    out_meta.flush()
+    del out_planes, out_meta
+    print(f"Planes/meta written. Total analyses: {total_analyses:,}")
+
+    # Concatenate analysis data from temp files
+    print("Concatenating analysis data...")
+    shard_ao_list = []
+    shard_ad_sizes = []
+    for s in range(num_shards):
+        ao = np.load(out_dir / f"_tmp_ao_{s}.npy")
+        shard_ao_list.append(ao)
+        shard_ad_sizes.append(int(ao[-1]))
+
+    global_offsets_parts = [np.array([0], dtype=np.uint32)]
+    running = np.uint64(0)
+    for s in range(num_shards):
+        local_offsets = shard_ao_list[s][1:].astype(np.uint64)
+        global_offsets_parts.append((local_offsets + running).astype(np.uint32))
+        running += np.uint64(shard_ad_sizes[s])
+    global_offsets = np.concatenate(global_offsets_parts)
+
+    total_ad = sum(shard_ad_sizes)
+    out_ad = np.lib.format.open_memmap(
+        str(out_dir / "train_analysis_data.npy"),
+        mode="w+", dtype=np.int32, shape=(total_ad, 5) if total_ad > 0 else (0, 5),
+    )
+    ad_cursor = 0
+    for s in range(num_shards):
+        chunk = np.load(out_dir / f"_tmp_ad_{s}.npy")
+        if len(chunk) > 0:
+            out_ad[ad_cursor : ad_cursor + len(chunk)] = chunk
+            ad_cursor += len(chunk)
+        os.unlink(out_dir / f"_tmp_ad_{s}.npy")
+        os.unlink(out_dir / f"_tmp_ao_{s}.npy")
+
+    out_ad.flush()
+    del out_ad
+    np.save(out_dir / "train_analysis_offsets.npy", global_offsets)
+    print(f"  {total_ad:,} analyses, {len(global_offsets) - 1:,} positions")
 
     # Save stats
     stats = {
-        "raw_samples": num_samples,
-        "unique_positions": n_unique,
-        "dedup_ratio": num_samples / n_unique,
-        "train_size": train_size,
-        "eval_size": eval_size,
+        "raw_samples": total_raw,
+        "unique_positions": total,
+        "dedup_ratio": total_raw / total,
         "total_analyses": total_analyses,
-        "avg_analyses_per_position": total_analyses / n_unique,
+        "avg_analyses_per_position": total_analyses / total,
+        "num_shards": num_shards,
     }
-    np.save(output_dir / "stats.npy", stats)
-
-    total_bytes = sum(f.stat().st_size for f in output_dir.glob("*.npy"))
-    print(f"Total size: {total_bytes / 1e9:.2f} GB")
+    np.save(out_dir / "stats.npy", stats)
     print(f"Stats: {stats}")
 
-    # Commit final output before cleaning up checkpoint
-    if volume:
-        volume.commit()
-
-    # Clean up checkpoint now that final output is saved
-    if checkpoint_dir.exists():
-        shutil.rmtree(checkpoint_dir)
-        print("Cleaned up checkpoint.")
-
+    output_volume.commit()
+    total_bytes = sum(f.stat().st_size for f in out_dir.glob("*.npy"))
+    print(f"Total output size: {total_bytes / 1e9:.2f} GB")
     print("Done!")
-
-
-def precompute_local(num_samples: str = "1M", output_dir: str = "cache/planes"):
-    """Run precompute locally."""
-    _precompute(num_samples, Path(output_dir))
 
 
 @app.function(
     image=image,
     volumes={"/root/cache": data_volume},
     timeout=86400,
-    memory=128000,
 )
-def precompute_modal(num_samples: str = "50M"):
-    """Run precompute on Modal."""
-    import os
-    import sys
-    sys.path.insert(0, "/root")
-    os.environ["HF_HOME"] = "/root/cache/hf"
-    _precompute(num_samples, Path("/root/cache/planes"), volume=data_volume)
-    data_volume.commit()
+def precompute_sharded(num_samples: str = "full", num_shards: int = 17):
+    """Coordinator: spawn shard workers, wait, then concat.
+
+    Re-runnable: completed shards (with marker files) are skipped.
+    """
+    parsed = parse_num_samples(num_samples) if isinstance(num_samples, str) else num_samples
+    folder_name = "full" if parsed == "full" else format_count(parsed)
+    output_dir = Path(f"/root/cache/planes/{folder_name}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check which shards are already done
+    data_volume.reload()
+    done = {i for i in range(num_shards) if (output_dir / f"shard_{i}_done").exists()}
+    missing = [i for i in range(num_shards) if i not in done]
+    print(f"Shards done: {sorted(done)}")
+    print(f"Shards missing: {missing}")
+
+    if missing:
+        print(f"Spawning {len(missing)} shard workers...")
+        list(
+            precompute_shard.starmap(
+                [(i, num_shards, num_samples) for i in missing]
+            )
+        )
+        print("All shards done!")
+    else:
+        print("All shards already complete.")
+
+    # Reload volume to see shard outputs
+    data_volume.reload()
+
+    # Run concat
+    print("Starting concat...")
+    concat_shards.remote(num_shards, folder_name)
+    print("Pipeline complete!")
 
 
-if __name__ == "__main__":
-    import fire
-    fire.Fire(precompute_local)
