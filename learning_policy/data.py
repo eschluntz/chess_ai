@@ -46,6 +46,7 @@ def analysis_to_score(cp_or_val: int, is_mate: int) -> float:
 def compute_soft_labels(
     analyses: np.ndarray,
     is_white_to_move: bool,
+    flip_table: np.ndarray = None,
 ) -> list[tuple[int, float]]:
     """
     Compute soft label probabilities from the deepest analysis session.
@@ -56,6 +57,7 @@ def compute_soft_labels(
     Args:
         analyses: (K, 5) int32 array - [move_idx, depth, knodes, cp_or_val, is_mate]
         is_white_to_move: True if white to move
+        flip_table: if provided and black to move, remap move indices to flipped coordinates
 
     Returns:
         List of (move_idx, probability) pairs
@@ -78,6 +80,8 @@ def compute_soft_labels(
             score = -score
 
         move_idx = int(move_idx)
+        if flip_table is not None and not is_white_to_move:
+            move_idx = int(flip_table[move_idx])
         if move_idx not in move_scores or score > move_scores[move_idx]:
             move_scores[move_idx] = score
 
@@ -96,6 +100,11 @@ def compute_soft_labels(
     return [(idx, w / total) for idx, w in move_weights.items()]
 
 
+def flip_sq(sq: int) -> int:
+    """Flip a square vertically: (rank, file) → (7-rank, file)."""
+    return (7 - sq // 8) * 8 + sq % 8
+
+
 class MoveVocab:
     """Bidirectional mapping between (from_sq, to_sq, promotion) and vocab indices."""
 
@@ -108,6 +117,12 @@ class MoveVocab:
         for idx, (f, t, p) in enumerate(self.moves):
             key = int(f) * 320 + int(t) * 5 + int(p)
             self._lookup[key] = idx
+
+        # Build flip remapping: flip_table[idx] = vocab index of the vertically flipped move
+        self.flip_table = np.zeros(self.num_moves, dtype=np.int32)
+        for idx, (f, t, p) in enumerate(self.moves):
+            flipped_key = flip_sq(int(f)) * 320 + flip_sq(int(t)) * 5 + int(p)
+            self.flip_table[idx] = int(self._lookup[flipped_key])
 
     def to_indices(self, moves: torch.Tensor) -> torch.Tensor:
         """Convert (batch, 3) moves to vocab indices. Vectorized tensor operation."""
@@ -130,9 +145,11 @@ class SoftLabelDataset:
     """Iterator that yields (planes, meta, soft_target) batches, computing labels from raw analyses."""
 
     def __init__(self, data_dir: Path, prefix: str, batch_size: int, num_classes: int,
-                 min_depth: int = 0, indices: np.ndarray = None, preload: bool = False):
+                 min_depth: int = 0, indices: np.ndarray = None, preload: bool = False,
+                 flip_table: np.ndarray = None):
         self.batch_size = batch_size
         self.num_classes = num_classes
+        self.flip_table = flip_table
 
         t0 = time.perf_counter()
         # Memory-map position arrays
@@ -223,7 +240,7 @@ class SoftLabelDataset:
                 analyses = self.analysis_data[a_start:a_end]
 
                 is_white = meta[j][0] == 1
-                labels = compute_soft_labels(analyses, is_white)
+                labels = compute_soft_labels(analyses, is_white, self.flip_table)
 
                 for move_idx, prob in labels:
                     soft_target[j, move_idx] = prob
@@ -236,12 +253,14 @@ class SoftLabelDataset:
         return self.num_batches
 
 
-def get_dataloaders(batch_size: int, num_samples: str = "full", min_depth: int = 0, deep_eval_depth: int = 50):
+def get_dataloaders(batch_size: int, num_samples: str = "full", min_depth: int = 0,
+                    deep_eval_depth: int = 50, flip_board: bool = False):
     """Load precomputed data with raw analyses.
 
     Args:
         min_depth: Filter training positions to those with max analysis depth >= this value.
         deep_eval_depth: Depth threshold for the deep eval loader.
+        flip_board: If True, remap black's moves to flipped coordinates.
 
     Returns:
         train_loader, eval_loader, eval_loader_deep, num_classes
@@ -250,8 +269,9 @@ def get_dataloaders(batch_size: int, num_samples: str = "full", min_depth: int =
 
     # Get num_classes from vocab
     vocab_path = CACHE_DIR / "vocab.npy"
-    vocab = np.load(vocab_path)
-    num_classes = len(vocab)
+    move_vocab = MoveVocab(vocab_path)
+    num_classes = move_vocab.num_moves
+    flip_table = move_vocab.flip_table if flip_board else None
 
     # Load stats if available
     stats_path = data_dir / "stats.npy"
@@ -275,11 +295,14 @@ def get_dataloaders(batch_size: int, num_samples: str = "full", min_depth: int =
     train_indices = np.sort(all_indices[eval_size:])
 
     train_loader = SoftLabelDataset(data_dir, "train", batch_size, num_classes,
-                                    min_depth=min_depth, indices=train_indices)
+                                    min_depth=min_depth, indices=train_indices,
+                                    flip_table=flip_table)
     eval_loader = SoftLabelDataset(data_dir, "train", batch_size, num_classes,
-                                   indices=eval_indices, preload=True)
+                                   indices=eval_indices, preload=True,
+                                   flip_table=flip_table)
     eval_loader_deep = SoftLabelDataset(data_dir, "train", batch_size, num_classes,
-                                        min_depth=deep_eval_depth, indices=eval_indices, preload=True)
+                                        min_depth=deep_eval_depth, indices=eval_indices, preload=True,
+                                        flip_table=flip_table)
 
     print(f"Train: {train_loader.num_samples:,} positions ({train_loader.num_batches:,} batches)")
     print(f"Eval: {eval_loader.num_samples:,} positions ({eval_loader.num_batches:,} batches)")

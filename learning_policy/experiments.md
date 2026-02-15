@@ -505,12 +505,191 @@ Reached **35%+ eval accuracy** at ~7k steps with `min_depth=0`. However, this is
 
 3. **Variance nearly eliminated**: With I/O no longer the bottleneck, machine-to-machine disk speed differences don't matter. Runs are now reproducible enough for single-run comparisons even on wall-clock time.
 
-# Future Planned Experiments
+## 2026-02-11: Mixed Precision Training (BF16/FP16)
+
+**Goal**: Speed up training with lower precision compute.
+
+### Isolated Benchmark
+
+Timed 100 forward+backward+optimizer steps on A10G with `torch.compile`:
+
+| Precision | ms/step | Speedup |
+|-----------|---------|---------|
+| TF32 (baseline) | 131 ms | 1.0x |
+| `set_float32_matmul_precision("medium")` | 131 ms | 1.0x |
+| FP16 (`torch.amp.autocast` + GradScaler) | 65 ms | 2.0x |
+| BF16 (`torch.amp.autocast`) | 64 ms | 2.0x |
+
+`"medium"` matmul precision had no effect — convolutions dominate over linear matmuls.
+
+### Training Runs (14 min, 3 replicas each)
+
+All runs include prefetch optimization from previous experiment.
+
+| Precision | Avg Steps | Avg Eval Acc | Avg Deep Acc | Speedup vs tf32 |
+|-----------|-----------|-------------|-------------|-----------------|
+| tf32 | 5,154 | 33.1% | 38.2% | 1.0x |
+| fp16 | 8,534 | 36.0% | 42.5% | 1.66x |
+| bf16 | 8,067 | 35.9% | 42.5% | 1.57x |
+
+### Conclusions
+
+1. **~1.6x wall-clock speedup** with no accuracy degradation. FP16 and BF16 achieve identical eval accuracy at the same step count — precision does not affect learning quality for this model.
+
+2. **FP16 slightly faster than BF16** (1.66x vs 1.57x), but BF16 is simpler (no GradScaler needed, same exponent range as FP32).
+
+3. **Throughput below theoretical 2x** because the prefetch thread becomes the bottleneck — GPU finishes faster but still waits for CPU data loading. The 2x speedup is fully realized in the isolated benchmark where data loading isn't a factor.
+
+4. **Standardized on BF16** for all future training.
+
+## 2026-02-12: RMSNorm + Board Flipping
+
+**Goal**: Two architecture/representation changes — RMSNorm (replacing LayerNorm) and board flipping for color symmetry.
+
+### RMSNorm
+
+Replaced all `LayerNorm` with `RMSNorm` (drop-in, same API). RMSNorm skips the mean subtraction, making it slightly faster with fewer parameters. Standard in modern LLMs (LLaMA, etc.). Not benchmarked in isolation — bundled with the flip experiment.
+
+### Board Flipping
+
+When it's black's turn, normalize the board to the current player's perspective:
+- Swap piece planes: white (0-5) ↔ black (6-11) → "my pieces" vs "their pieces"
+- Flip ranks vertically so current player's pieces are at the bottom
+- Swap castling rights to "my castling" / "their castling"
+- Drop the turn channel (always "my turn") → 17 input channels instead of 18
+- Remap move targets to flipped coordinates (e7e5 → e2e4)
+
+**Setup**: 2 runs each of flip vs noflip, 60 minutes, full dataset, 20M model (H=128, L=14, K=3), BF16.
+
+### Results
+
+**At 15k steps (step-matched comparison):**
+
+| Config | Eval Acc | Deep Acc |
+|--------|----------|----------|
+| flip (avg) | 39.8% | 46.8% |
+| noflip (avg) | 37.4% | 44.2% |
+| **Difference** | **+2.4pp** | **+2.6pp** |
+
+**Final (60 min):**
+
+| Run | Steps | Eval Acc | Deep Acc |
+|-----|-------|----------|----------|
+| flip-0 | 39,397 | 43.1% | 50.4% |
+| flip-1 | 45,855 | 44.4% | 52.4% |
+| noflip-0 | 40,538 | 41.2% | 49.5% |
+| noflip-1 | 53,579 | 42.7% | 51.5% |
+
+### Conclusions
+
+1. **Flip gives ~2.5pp improvement** at the same step count on both metrics. The network learns that symmetric patterns (e.g., "my knight attacks their pawn") are the same regardless of color.
+
+2. **Effectively doubles training signal**: Each position teaches the same pattern that would otherwise need to be learned separately for white and black.
+
+3. **Standardized flip_board=True** for all future training.
+
+## 2026-02-14: Weight Decay Sweep
+
+**Goal**: Determine optimal weight decay for AdamW.
+
+**Setup**: 50M dataset, 20M model (H=128, L=14, K=3), flip+BF16, lr=0.001, 30 min.
+
+| Config | Eval Acc | Deep Acc |
+|--------|----------|----------|
+| wd=0   | 42.1%    | 50.8%    |
+| **wd=0.01** | **43.0%**    | **51.2%**    |
+| wd=0.1 | 41.1%    | 48.9%    |
+
+![Weight decay sweep](img/wd_sweep.png)
+
+**Conclusion**: wd=0.01 gives a modest improvement (~1pp). wd=0.1 is too aggressive and hurts training. Standardized on wd=0.01.
+
+## 2026-02-14: Learning Rate + Cosine Decay Sweep
+
+**Goal**: Find optimal LR and test cosine annealing schedule.
+
+**Setup**: 50M dataset, 20M model, flip+BF16, wd=0.01, 20k steps (step-matched via `max_steps`).
+
+| Config           | LR   | Schedule | Eval Acc   | Deep Acc   |
+|------------------|------|----------|------------|------------|
+| lr-0.0003-cos    | 3e-4 | cosine   | 43.8%      | 51.9%      |
+| lr-0.001-cos     | 1e-3 | cosine   | **44.4%**  | **52.5%**  |
+| lr-0.003-cos     | 3e-3 | cosine   | 44.4%      | 52.8%      |
+| lr-0.0003-const  | 3e-4 | constant | 41.7%      | 50.0%      |
+| lr-0.001-const   | 1e-3 | constant | 42.2%      | 50.4%      |
+| lr-0.003-const   | 3e-3 | constant | 41.3%      | 49.6%      |
+
+![LR and cosine decay sweep](img/lr_and_cos_decay.png)
+
+### Conclusions
+
+1. **Cosine decay is a clear winner**: Every cosine run beat every constant run. The worst cosine config (3e-4) outperformed the best constant config (1e-3) by 1.4pp.
+
+2. **LR is less sensitive with cosine decay**: All three LRs perform within 0.6pp under cosine, vs 1.2pp spread under constant. Cosine decay compensates for suboptimal initial LR by decaying to near-zero regardless.
+
+3. **lr=0.001 with cosine confirmed**: Matches the previous LR sweep result. 3e-3 with cosine is equally good — the higher initial LR doesn't hurt because cosine brings it down quickly.
+
+4. **Standardized on lr=0.001, cosine decay, wd=0.01** for all future training.
+
+## 2026-02-14: Model Scaling (10M–160M, 10 hours)
+
+**Goal**: Scale model size with all optimizations (BF16, prefetch, flip, cosine decay, wd=0.01, RMSNorm).
+
+**Setup**:
+- Architecture: K=3, L=14 fixed, width scaling via hidden_channels
+- Training: BF16, AdamW (lr=0.001, wd=0.01), cosine decay over 10 hours, bs=1024
+- Data: Full 342M dataset, flip_board=True
+- GPU: A10G
+
+![img](img/scale_cnn_results.png)
+
+| Config | H | Params | Steps | Epochs | Final Eval | Deep Acc | Train-Eval Gap |
+|--------|---|--------|-------|--------|-----------|----------|----------------|
+| scale-10M | 72 | 10.7M | 448k | 1.34 | 48.3% | 56.5% | +0.2% |
+| **scale-20M** | **128** | **20.8M** | **533k** | **1.59** | **50.5%** | **58.0%** | **+0.5%** |
+| scale-40M | 224 | 41.7M | 199k | 0.60 | 50.4% | 57.9% | +0.2% |
+| scale-80M | 364 | 80.7M | 75k | 0.23 | 45.1% | 52.3% | +0.1% |
+| scale-160M | 584 | 160.7M | 37k | 0.11 | 43.5% | 49.3% | -0.1% |
+
+### Analysis: Larger Models are Undertrained, Not Saturated
+
+**No overfitting**: Train-eval gaps are <0.5% across all sizes. More training would help.
+
+**Throughput disparity**: The 10M model completed 1.34 epochs (448k steps) while 160M saw only 11% of the dataset (37k steps). Larger models are slower per step, so they see far fewer samples in 10 hours.
+
+**Log-linear curve fitting** (`acc = slope * log(samples) + intercept`, fit to first 6 hours before cosine kills LR):
+
+| Model | Log Slope | R² | @2x samples | @4x samples | @10x samples |
+|-------|-----------|-----|-------------|-------------|--------------|
+| 10M | 0.032 | 0.97 | 48.4% | 50.6% | 53.6% |
+| 20M | 0.035 | 0.97 | 50.7% | 53.1% | 56.4% |
+| 40M | 0.045 | 0.98 | 51.5% | 54.6% | 58.7% |
+| 80M | 0.054 | 0.98 | 46.6% | 50.4% | 55.3% |
+| 160M | 0.062 | 0.99 | 44.8% | 49.1% | 54.9% |
+
+**Larger models learn faster per sample** — log slopes increase monotonically with model size (0.032 → 0.062). They just haven't seen enough data in 10 hours.
+
+### Conclusions
+
+1. **Not saturating**: The architecture and data can support much higher accuracy. The constraint is training compute.
+
+2. **Cosine decay confounds the comparison**: In the last hour, LR was ~2.4% of initial — models couldn't learn regardless of capacity. The flattening is the schedule, not a ceiling.
+
+3. **40M is the best compute-efficiency bet**: Projected to reach 58.7% at 10x current samples (~2M samples, ~30-40 hours). Steeper learning curve than 20M but doesn't need as extreme training time as 80M/160M.
+
+4. **20M and 40M tied at 10 hours** (50.5% vs 50.4%), but 40M only saw 0.6 epochs vs 1.6. Per-sample, 40M is clearly superior.
+
+5. **Single runs — throughput noise present but not outcome-changing**: The 10M model inexplicably ran slower than 20M (likely a slow Modal machine). However, the spacing between lines is large enough that ±15% horizontal stretch wouldn't change rankings, except for the 20M/40M tie which needs longer training to break.
+
+**Next steps**: Run 40M for 24-48 hours with cosine decay matched to the longer duration, or use constant LR to see true scaling behavior without schedule artifacts.
 
 - [x] ~~confirm the best strategy for combining duplicate rows (soft labels vs throw out non-max)~~
   - [x] ~~generate 50M and 250M datasets on modal~~
   - [x] ~~verify that i can get above 24% acc~~ → reached 32%
 - [x] ~~train on 250M dataset~~ → trained on full 844M (342M unique)
 - [x] ~~measure how much noise is in my system with several runs of exactly the same settings~~ → throughput noise, not learning noise
-- [ ] compare full dataset with depth_30 filter against previous 50M depth_30 result
-- [ ] systems efficiency: increase vocab size to be a power of 2? learning rates / $ on different GPUs.
+- [x] ~~systems efficiency~~:
+  - [x] ~~increase vocab size to be a power of 2~~ → no effect
+  - [x] ~~lower precision training~~ → BF16 standardized, 1.6x speedup
+  - [ ] learning progress per $ on different GPUs.
+

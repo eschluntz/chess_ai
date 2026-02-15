@@ -39,12 +39,16 @@ def train(
     kernel_size: int = 3,
     batch_size: int = 1024,
     lr: float = 0.001,
-    max_seconds: int = 14400,
+    max_seconds: int = 0,
+    max_steps: int = 0,
     eval_interval_seconds: int = 120,
     run_name: str = None,
     checkpoint_dir: str = "checkpoints",
     num_samples: str = "full",
     min_depth: int = 0,
+    flip_board: bool = False,
+    weight_decay: float = 0.0,
+    cosine_decay: bool = False,
 ):
     import sys
 
@@ -77,7 +81,7 @@ def train(
 
     # Load data from precomputed features
     train_loader, eval_loader, eval_loader_deep, num_classes = get_dataloaders(
-        batch_size, num_samples=num_samples, min_depth=min_depth
+        batch_size, num_samples=num_samples, min_depth=min_depth, flip_board=flip_board
     )
     total_samples = train_loader.num_samples
     num_moves = num_classes
@@ -89,10 +93,20 @@ def train(
         hidden_channels=hidden_channels,
         num_layers=num_layers,
         kernel_size=kernel_size,
+        flip_board=flip_board,
     ).to(device)
     model = torch.compile(model)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    # LR schedule: cosine decay based on time (wall-clock) or steps
+    if cosine_decay and max_steps:
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_steps)
+    else:
+        scheduler = None  # time-based cosine handled manually in training loop
+
+    # Mixed precision (bf16)
+    _amp_dtype = torch.bfloat16
 
     @torch.no_grad()
     def run_eval(loader):
@@ -102,8 +116,11 @@ def train(
         total = 0
         for planes, meta, target in loader:
             planes, meta, target = planes.to(device), meta.to(device), target.to(device)
-            logits = model(planes, meta)
-            losses.append(criterion(logits, target).item())
+            with torch.amp.autocast(
+                device_type="cuda", dtype=_amp_dtype, enabled=_amp_dtype is not None
+            ):
+                logits = model(planes, meta)
+                losses.append(criterion(logits, target).item())
             correct += (logits.argmax(dim=1) == target.argmax(dim=1)).sum().item()
             total += len(target)
         model.train()
@@ -122,7 +139,10 @@ def train(
     print(f"[{run_name}] Layers: {num_layers}, Hidden: {hidden_channels}")
     print(f"[{run_name}] Output classes: {num_moves}")
     print(f"[{run_name}] Batch size: {batch_size}, LR: {lr}")
-    print(f"[{run_name}] Max time: {max_seconds}s")
+    if max_steps:
+        print(f"[{run_name}] Max steps: {max_steps}")
+    if max_seconds:
+        print(f"[{run_name}] Max time: {max_seconds}s")
 
     os.makedirs(checkpoint_dir, exist_ok=True)
     checkpoint_path = os.path.join(checkpoint_dir, f"{run_name}.pt")
@@ -210,8 +230,8 @@ def train(
 
     def prefetch(iterator, n=2):
         """Pre-compute batches in a background thread to overlap CPU/GPU work."""
-        from threading import Thread
         from queue import Queue
+        from threading import Thread
 
         q = Queue(maxsize=n)
 
@@ -233,7 +253,9 @@ def train(
     while True:
         elapsed_this_run = time.time() - start_time
         total_elapsed = elapsed_before + elapsed_this_run
-        if total_elapsed >= max_seconds:
+        if max_steps and step >= max_steps:
+            break
+        if max_seconds and total_elapsed >= max_seconds:
             break
 
         t0 = time.time()
@@ -247,8 +269,11 @@ def train(
         optimizer.zero_grad()
 
         t0 = time.time()
-        logits = model(planes, meta)
-        loss = criterion(logits, target)
+        with torch.amp.autocast(
+            device_type="cuda", dtype=_amp_dtype, enabled=_amp_dtype is not None
+        ):
+            logits = model(planes, meta)
+            loss = criterion(logits, target)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         time_forward += time.time() - t0
@@ -261,6 +286,15 @@ def train(
 
         t0 = time.time()
         optimizer.step()
+        if scheduler:
+            scheduler.step()
+        elif cosine_decay and max_seconds:
+            # Time-based cosine decay
+            import math
+            progress = min(total_elapsed / max_seconds, 1.0)
+            new_lr = lr * 0.5 * (1 + math.cos(math.pi * progress))
+            for pg in optimizer.param_groups:
+                pg["lr"] = new_lr
         time_optim += time.time() - t0
 
         step += 1
@@ -326,6 +360,7 @@ def train(
                     "train_acc": train_acc,
                     **eval_metrics,
                     "samples_seen": samples_seen,
+                    "lr": optimizer.param_groups[0]["lr"],
                     "pct_data": pct_data,
                     "pct_transfer": pct_transfer,
                     "pct_forward": pct_forward,
@@ -364,21 +399,26 @@ def train(
 
 @app.function(image=image, timeout=86000)  # 23.5 hours for sweep coordination
 def sweep():
-    """Test prefetch speedup with 3 identical runs."""
+    """Model size scaling: 10M, 20M, 40M, 80M."""
     configs = [
-        {"run_name": f"full-data-test-v4-fast-{i}"}
-        for i in range(3)
+        {"run_name": "scale-10M", "hidden_channels": 72},
+        {"run_name": "scale-20M", "hidden_channels": 128},
+        {"run_name": "scale-40M", "hidden_channels": 224},
+        {"run_name": "scale-80M", "hidden_channels": 364},
+        {"run_name": "scale-160M", "hidden_channels": 584},
     ]
 
     for cfg in configs:
-        cfg["hidden_channels"] = 128
         cfg["num_layers"] = 14
         cfg["kernel_size"] = 3
         cfg["batch_size"] = 1024
         cfg["lr"] = 0.001
+        cfg["weight_decay"] = 0.01
+        cfg["cosine_decay"] = True
         cfg["num_samples"] = "full"
         cfg["min_depth"] = 0
-        cfg["max_seconds"] = 900  # 15 minutes
+        cfg["flip_board"] = True
+        cfg["max_seconds"] = 36000  # 10 hours
 
     print(f"Launching {len(configs)} parallel runs:")
     for cfg in configs:
@@ -413,6 +453,50 @@ def sweep():
             )
 
     return results
+
+
+@app.function(image=image, gpu="A10G", timeout=300)
+def bench_vram():
+    """Check VRAM usage for different model sizes."""
+    import sys
+    sys.path.insert(0, "/root")
+    import torch
+    import torch.nn as nn
+    from cnn_model import PolicyCNN
+
+    torch.set_float32_matmul_precision("high")
+    device = torch.device("cuda")
+    batch_size = 1024
+
+    for h, name in [(584, "160M")]:
+        torch.cuda.reset_peak_memory_stats()
+        model = PolicyCNN(num_moves=1968, hidden_channels=h, num_layers=14, kernel_size=3, flip_board=True).to(device)
+        model = torch.compile(model)
+        criterion = nn.CrossEntropyLoss()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.01)
+
+        planes = torch.randint(0, 2, (batch_size, 13, 8, 8), dtype=torch.uint8, device=device)
+        meta = torch.randint(-1, 2, (batch_size, 5), dtype=torch.int8, device=device)
+        target = torch.zeros(batch_size, 1968, device=device)
+        target[:, 0] = 1.0
+
+        try:
+            for i in range(3):
+                optimizer.zero_grad()
+                with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    logits = model(planes, meta)
+                    loss = criterion(logits, target)
+                loss.backward()
+                optimizer.step()
+            torch.cuda.synchronize()
+            peak_gb = torch.cuda.max_memory_allocated() / 1e9
+            total_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+            print(f"{name} (H={h}): {peak_gb:.1f} GB / {total_gb:.1f} GB ({100*peak_gb/total_gb:.0f}%)")
+        except torch.cuda.OutOfMemoryError:
+            print(f"{name} (H={h}): OOM!")
+        finally:
+            del model, optimizer, criterion
+            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":
