@@ -3,543 +3,1233 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chess Policy Visualizer</title>
+    <title>Chess Head-to-Head Arena</title>
 
-    <!-- Chess.js for game logic -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Source+Code+Pro:wght@500&display=swap" rel="stylesheet">
+
     <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
-
-    <!-- Chessboard.js -->
     <link rel="stylesheet" href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css">
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
     <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
 
     <style>
+        :root {
+            --bg: #f5efe5;
+            --paper: #fffaf1;
+            --ink: #1e261b;
+            --muted: #5d6b57;
+            --accent: #2e6f40;
+            --accent-2: #f0a202;
+            --line: #d9cfbe;
+            --white-chip: #f8f8f8;
+            --black-chip: #2e2f2d;
+            --danger: #c44536;
+        }
+
         * {
             box-sizing: border-box;
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #1a1a2e;
-            color: #eee;
             margin: 0;
-            padding: 20px;
+            font-family: 'Space Grotesk', sans-serif;
+            background:
+                radial-gradient(circle at 15% -5%, #fffaf1 0%, transparent 45%),
+                radial-gradient(circle at 100% 0%, #dce8dc 0%, transparent 35%),
+                var(--bg);
+            color: var(--ink);
             min-height: 100vh;
+            padding: 20px;
         }
 
-        .container {
-            max-width: 1000px;
+        .shell {
+            max-width: 1280px;
             margin: 0 auto;
         }
 
-        h1 {
-            text-align: center;
-            color: #4ecca3;
-            margin-bottom: 20px;
+        .heading {
+            margin-bottom: 16px;
         }
 
-        .main-layout {
-            display: flex;
-            gap: 30px;
-            align-items: flex-start;
+        .heading h1 {
+            margin: 0;
+            font-size: clamp(1.6rem, 3vw, 2.4rem);
+            letter-spacing: 0.01em;
         }
 
-        .board-container {
+        .heading p {
+            margin: 8px 0 0;
+            color: var(--muted);
+        }
+
+        .layout {
+            display: grid;
+            grid-template-columns: minmax(320px, 620px) minmax(320px, 1fr);
+            gap: 18px;
+            align-items: start;
+        }
+
+        .panel {
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 14px;
+            padding: 14px;
+            box-shadow: 0 8px 20px rgba(46, 111, 64, 0.08);
+        }
+
+        .board-wrap {
             position: relative;
-            width: 500px;
-            flex-shrink: 0;
+            width: 100%;
+            max-width: 560px;
+            margin: 0 auto;
         }
 
         #board {
-            width: 500px;
-        }
-
-        #arrow-svg {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 500px;
-            height: 500px;
-            pointer-events: none;
-            z-index: 100;
-        }
-
-        .controls {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            gap: 15px;
-        }
-
-        .control-group {
-            background: #16213e;
-            padding: 15px;
+            width: 100%;
             border-radius: 8px;
+            overflow: hidden;
         }
 
-        .control-group h3 {
-            margin: 0 0 10px 0;
-            color: #4ecca3;
-            font-size: 14px;
-            text-transform: uppercase;
+        #arrow-layer {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
         }
 
-        .turn-indicator {
-            font-size: 18px;
-            font-weight: bold;
-            padding: 10px;
-            text-align: center;
-            border-radius: 6px;
+        .status-row {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+            flex-wrap: wrap;
+            justify-content: center;
         }
 
-        .turn-white {
-            background: #f0f0f0;
-            color: #222;
+        .chip {
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-size: 0.85rem;
+            border: 1px solid var(--line);
+            background: #fff;
         }
 
-        .turn-black {
-            background: #333;
+        .chip.white {
+            background: var(--white-chip);
+        }
+
+        .chip.black {
+            background: var(--black-chip);
             color: #fff;
         }
 
-        .slider-container {
-            display: flex;
-            align-items: center;
-            gap: 10px;
+        .chip.result {
+            background: #ebf6eb;
+            border-color: #b5d4b7;
+            color: #234f2d;
         }
 
-        .slider-container input[type="range"] {
-            flex: 1;
-        }
-
-        .slider-value {
-            min-width: 30px;
-            text-align: center;
-            font-weight: bold;
-            color: #4ecca3;
-        }
-
-        .button-row {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
+        .controls-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 8px;
+            margin-top: 12px;
         }
 
         button {
-            background: #4ecca3;
-            color: #1a1a2e;
-            border: none;
-            padding: 10px 16px;
-            border-radius: 6px;
-            font-weight: bold;
+            font-family: inherit;
+            border: 1px solid #255a34;
+            background: var(--accent);
+            color: #f5fff8;
+            border-radius: 10px;
+            padding: 9px 10px;
+            font-weight: 600;
             cursor: pointer;
-            transition: background 0.2s;
         }
 
         button:hover {
-            background: #3dbd94;
+            filter: brightness(0.95);
         }
 
         button.secondary {
-            background: #393e6f;
-            color: #eee;
+            background: #fff;
+            color: var(--accent);
+            border-color: var(--accent);
         }
 
-        button.secondary:hover {
-            background: #4a4f80;
+        button.warn {
+            background: var(--accent-2);
+            border-color: #b77e02;
+            color: #2c2200;
         }
 
-        .fen-input {
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .row {
             display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-top: 10px;
+        }
+
+        .row label {
+            font-size: 0.88rem;
+            color: var(--muted);
+        }
+
+        input[type="text"],
+        input[type="number"],
+        select {
+            width: 100%;
+            font: inherit;
+            border: 1px solid var(--line);
+            background: #fff;
+            color: var(--ink);
+            border-radius: 8px;
+            padding: 8px 10px;
+        }
+
+        input.code {
+            font-family: 'Source Code Pro', monospace;
+            font-size: 0.78rem;
+        }
+
+        .two-col {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
             gap: 10px;
         }
 
-        .fen-input input {
-            flex: 1;
+        .engine-card {
+            border: 1px solid var(--line);
+            border-radius: 10px;
             padding: 10px;
-            border: 1px solid #393e6f;
-            border-radius: 6px;
-            background: #0f0f23;
-            color: #eee;
-            font-family: monospace;
-            font-size: 12px;
+            background: #fffefa;
+            margin-top: 10px;
         }
 
-        .move-list {
-            max-height: 200px;
-            overflow-y: auto;
+        .engine-card h3 {
+            margin: 0 0 8px;
+            font-size: 1rem;
         }
 
-        .move-item {
-            display: flex;
-            justify-content: space-between;
+        .temp-toggle {
+            display: inline-flex;
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            overflow: hidden;
+        }
+
+        .temp-toggle label {
             padding: 6px 10px;
-            border-radius: 4px;
-            margin-bottom: 4px;
+            background: #fff;
+            cursor: pointer;
+            font-size: 0.82rem;
+            color: var(--muted);
         }
 
-        .move-item:nth-child(odd) {
-            background: #0f0f23;
+        .temp-toggle input {
+            display: none;
         }
 
-        .move-name {
-            font-family: monospace;
-            font-weight: bold;
+        .temp-toggle input:checked + span {
+            color: #fff;
+            background: var(--accent);
         }
 
-        .move-prob {
-            color: #4ecca3;
+        .temp-toggle span {
+            display: inline-block;
+            padding: 2px 4px;
+            border-radius: 999px;
         }
 
-        .prob-bar {
-            height: 4px;
-            background: #4ecca3;
-            border-radius: 2px;
-            margin-top: 4px;
+        .section-title {
+            margin: 0;
+            font-size: 1rem;
+            letter-spacing: 0.02em;
+        }
+
+        .muted {
+            color: var(--muted);
+            font-size: 0.85rem;
+        }
+
+        .scroll {
+            max-height: 220px;
+            overflow-y: auto;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: #fff;
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            font-size: 0.9rem;
+        }
+
+        th,
+        td {
+            border-bottom: 1px solid var(--line);
+            text-align: left;
+            padding: 6px 8px;
+            vertical-align: top;
+        }
+
+        tr.active {
+            background: #edf8ef;
+        }
+
+        .error {
+            margin-top: 8px;
+            color: var(--danger);
+            min-height: 20px;
+            font-size: 0.9rem;
+        }
+
+        .progress {
+            margin-top: 8px;
+            color: var(--muted);
+            min-height: 20px;
+            font-size: 0.9rem;
+        }
+
+        .progress-track {
+            width: 100%;
+            height: 12px;
+            border-radius: 999px;
+            background: #e9e1d2;
+            border: 1px solid var(--line);
+            overflow: hidden;
+            margin-top: 8px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #2e6f40, #6cae75);
+            transition: width 0.18s linear;
+        }
+
+        .arrow-note {
+            margin-top: 8px;
+            font-size: 0.82rem;
+            color: var(--muted);
+        }
+
+        @media (max-width: 1050px) {
+            .layout {
+                grid-template-columns: 1fr;
+            }
+
+            .board-wrap {
+                max-width: 500px;
+            }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Chess Policy Visualizer</h1>
+    <div class="shell">
+        <div class="heading">
+            <h1>Chess Head-to-Head Arena</h1>
+            <p>Run model-vs-model matches, step through every move, and compare win rates.</p>
+        </div>
 
-        <div class="main-layout">
-            <div class="board-container">
-                <div id="board"></div>
-                <svg id="arrow-svg" viewBox="0 0 500 500"></svg>
+        <div class="layout">
+            <div class="panel">
+                <div class="board-wrap">
+                    <div id="board"></div>
+                    <svg id="arrow-layer"></svg>
+                </div>
+
+                <div class="status-row">
+                    <span id="turn-chip" class="chip white">White to move</span>
+                    <span id="ply-chip" class="chip">Ply 0</span>
+                    <span id="result-chip" class="chip result">No match loaded</span>
+                </div>
+
+                <div class="controls-grid">
+                    <button id="play-pause">Play</button>
+                    <button id="step-back" class="secondary">Step -1</button>
+                    <button id="step-forward" class="secondary">Step +1</button>
+                    <button id="flip-board" class="secondary">Flip</button>
+                </div>
+
+                <div class="row">
+                    <label for="speed-ms">Speed</label>
+                    <input id="speed-ms" type="range" min="20" max="800" value="220" style="flex:1;">
+                    <span id="speed-value" class="muted">220ms</span>
+                    <label><input id="max-speed" type="checkbox"> Max speed</label>
+                </div>
+
+                <div class="arrow-note">Arrows show candidate moves with probability >= 20% for the side to move.</div>
+
+                <div class="row" style="margin-top:12px;">
+                    <p class="section-title" style="margin-right:8px;">Top Moves</p>
+                    <span class="muted" id="active-engine"></span>
+                </div>
+                <div class="scroll">
+                    <table id="top-moves-table">
+                        <thead>
+                            <tr><th>Move</th><th>Prob</th></tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+
+                <div class="row" style="margin-top:12px;">
+                    <p class="section-title" style="margin-right:8px;">Move List</p>
+                </div>
+                <div class="scroll">
+                    <table id="moves-table">
+                        <thead>
+                            <tr><th>#</th><th>White</th><th>Black</th></tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
             </div>
 
-            <div class="controls">
-                <div class="control-group">
-                    <div id="turn-indicator" class="turn-indicator turn-white">White to move</div>
-                </div>
+            <div class="panel">
+                <p class="section-title">Engine Setup</p>
+                <p class="muted">Use policy checkpoints or classical negamax from /core.</p>
 
-                <div class="control-group">
-                    <h3>Top Moves</h3>
-                    <div class="slider-container">
-                        <span>N:</span>
-                        <input type="range" id="top-n" min="1" max="10" value="5">
-                        <span class="slider-value" id="top-n-value">5</span>
+                <div class="two-col">
+                    <div class="engine-card">
+                        <h3>White</h3>
+                        <div class="row">
+                            <label style="flex:1;">Engine type</label>
+                            <select id="white-kind">
+                                <option value="policy">Policy checkpoint</option>
+                                <option value="negamax">Classical negamax</option>
+                            </select>
+                        </div>
+
+                        <div id="white-policy-fields">
+                            <div class="row">
+                                <label style="width:100%;">Checkpoint path</label>
+                                <input id="white-checkpoint" class="code" type="text" placeholder="/absolute/path/to/model.pt">
+                            </div>
+                        </div>
+
+                        <div id="white-negamax-fields" style="display:none;">
+                            <div class="row">
+                                <label style="flex:1;">Eval</label>
+                                <select id="white-eval">
+                                    <option value="piece_value">piece_value</option>
+                                    <option value="piece_position">piece_position</option>
+                                </select>
+                            </div>
+                            <div class="row">
+                                <label style="flex:1;">Depth</label>
+                                <input id="white-depth" type="number" min="1" max="6" value="2">
+                            </div>
+                        </div>
+
+                        <div class="row">
+                            <label>Temperature</label>
+                            <div class="temp-toggle">
+                                <label>
+                                    <input type="radio" name="white-temp" value="0" checked>
+                                    <span>temp=0</span>
+                                </label>
+                                <label>
+                                    <input type="radio" name="white-temp" value="1">
+                                    <span>temp=1</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="engine-card">
+                        <h3>Black</h3>
+                        <div class="row">
+                            <label style="flex:1;">Engine type</label>
+                            <select id="black-kind">
+                                <option value="policy">Policy checkpoint</option>
+                                <option value="negamax">Classical negamax</option>
+                            </select>
+                        </div>
+
+                        <div id="black-policy-fields">
+                            <div class="row">
+                                <label style="width:100%;">Checkpoint path</label>
+                                <input id="black-checkpoint" class="code" type="text" placeholder="/absolute/path/to/model.pt">
+                            </div>
+                        </div>
+
+                        <div id="black-negamax-fields" style="display:none;">
+                            <div class="row">
+                                <label style="flex:1;">Eval</label>
+                                <select id="black-eval">
+                                    <option value="piece_value">piece_value</option>
+                                    <option value="piece_position">piece_position</option>
+                                </select>
+                            </div>
+                            <div class="row">
+                                <label style="flex:1;">Depth</label>
+                                <input id="black-depth" type="number" min="1" max="6" value="2">
+                            </div>
+                        </div>
+
+                        <div class="row">
+                            <label>Temperature</label>
+                            <div class="temp-toggle">
+                                <label>
+                                    <input type="radio" name="black-temp" value="0" checked>
+                                    <span>temp=0</span>
+                                </label>
+                                <label>
+                                    <input type="radio" name="black-temp" value="1">
+                                    <span>temp=1</span>
+                                </label>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
-                <div class="control-group">
-                    <h3>Sample Move</h3>
-                    <div class="button-row">
-                        <button id="sample-greedy">Sample (temp=0)</button>
-                        <button id="sample-random">Sample (temp=1)</button>
-                    </div>
+                <div class="row" style="margin-top:12px;">
+                    <label style="flex:1;">Max plies</label>
+                    <input id="max-plies" type="number" min="20" max="800" value="300">
                 </div>
 
-                <div class="control-group">
-                    <h3>Board Controls</h3>
-                    <div class="button-row">
-                        <button id="reset-btn" class="secondary">Reset</button>
-                        <button id="flip-btn" class="secondary">Flip Board</button>
-                        <button id="undo-btn" class="secondary">Undo</button>
-                    </div>
+                <div class="row">
+                    <label style="flex:1;">Start FEN</label>
+                    <input id="start-fen" class="code" type="text" value="">
+                </div>
+                <div class="row">
+                    <label style="flex:1;">Common opening</label>
+                    <select id="opening-select"></select>
+                    <button id="use-opening" class="secondary">Use Opening</button>
                 </div>
 
-                <div class="control-group">
-                    <h3>Set Position (FEN)</h3>
-                    <div class="fen-input">
-                        <input type="text" id="fen-input" placeholder="Enter FEN...">
-                        <button id="set-fen-btn">Set</button>
-                    </div>
+                <div class="row" style="margin-top:14px;">
+                    <button id="run-match" style="flex:1;">Run Match</button>
+                    <button id="reset-view" class="secondary">Reset View</button>
+                </div>
+                <div id="run-match-progress" class="progress"></div>
+
+                <hr style="border:none;border-top:1px solid var(--line); margin:16px 0;">
+
+                <p class="section-title">Win-Rate Series</p>
+                <div class="row">
+                    <label style="flex:1;">Games</label>
+                    <input id="series-games" type="number" min="2" max="500" value="20">
+                    <label><input id="swap-colors" type="checkbox" checked> Swap colors each game</label>
+                </div>
+                <div class="row">
+                    <label><input id="series-diverse-openings" type="checkbox"> Diverse openings (ON) or normal start board for all games (OFF)</label>
+                </div>
+                <div class="row">
+                    <button id="run-series" class="warn" style="flex:1;">Run Series</button>
+                </div>
+                <div class="progress-track">
+                    <div id="series-progress-bar" class="progress-fill"></div>
+                </div>
+                <div id="series-progress-text" class="progress"></div>
+
+                <div class="scroll" style="margin-top:10px;">
+                    <table id="series-table">
+                        <thead>
+                            <tr><th>Model</th><th>W</th><th>L</th><th>D</th><th>Win rate</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td colspan="5" class="muted">No series run yet.</td></tr>
+                        </tbody>
+                    </table>
                 </div>
 
-                <div class="control-group">
-                    <h3>Top Moves</h3>
-                    <div id="move-list" class="move-list"></div>
-                </div>
+                <div id="error-box" class="error"></div>
             </div>
         </div>
     </div>
 
     <script>
-        // Game state
-        let game = new Chess();
         let board = null;
         let boardOrientation = 'white';
+        let defaultStartFen = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+        let openingsById = {};
+        let selectedOpeningId = '';
 
-        // Square size (board is 500px, 8 squares)
-        const SQUARE_SIZE = 500 / 8;
+        let matchData = null;
+        let matchSessionId = null;
+        let frames = [];
+        let currentFrame = 0;
 
-        // Initialize board
-        function initBoard() {
-            const config = {
-                draggable: true,
-                position: 'start',
-                orientation: boardOrientation,
-                onDragStart: onDragStart,
-                onDrop: onDrop,
-                onSnapEnd: onSnapEnd,
-                pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png'
-            };
-            board = Chessboard('board', config);
+        let isPlaying = false;
+        let playTimer = null;
+        let stepInFlight = false;
+        let seriesPollTimer = null;
+
+        function setError(text) {
+            document.getElementById('error-box').textContent = text || '';
         }
 
-        function onDragStart(source, piece, position, orientation) {
-            // Don't allow picking up pieces if game is over
-            if (game.game_over()) return false;
-
-            // Only allow current player to move
-            if ((game.turn() === 'w' && piece.search(/^b/) !== -1) ||
-                (game.turn() === 'b' && piece.search(/^w/) !== -1)) {
-                return false;
-            }
+        function setProgress(text) {
+            document.getElementById('run-match-progress').textContent = text || '';
         }
 
-        function onDrop(source, target) {
-            // Try the move
-            const move = game.move({
-                from: source,
-                to: target,
-                promotion: 'q' // Always promote to queen for simplicity
-            });
-
-            if (move === null) return 'snapback';
-
-            updateDisplay();
+        function setSeriesProgress(done, total, label = '') {
+            const safeTotal = Math.max(0, total || 0);
+            const safeDone = Math.max(0, Math.min(done || 0, safeTotal || 1));
+            const pct = safeTotal > 0 ? (safeDone / safeTotal) * 100 : 0;
+            document.getElementById('series-progress-bar').style.width = `${pct.toFixed(1)}%`;
+            const prefix = safeTotal > 0 ? `Series progress: ${safeDone}/${safeTotal} games` : 'Series progress: 0/0 games';
+            document.getElementById('series-progress-text').textContent = label ? `${prefix} (${label})` : prefix;
         }
 
-        function onSnapEnd() {
-            board.position(game.fen());
+        function boardSize() {
+            return document.getElementById('board').getBoundingClientRect().width;
         }
 
-        // Get square center coordinates
         function getSquareCenter(square) {
-            const file = square.charCodeAt(0) - 97; // a=0, b=1, etc.
-            const rank = parseInt(square[1]) - 1;   // 1=0, 2=1, etc.
+            const s = boardSize() / 8;
+            const file = square.charCodeAt(0) - 97;
+            const rank = parseInt(square[1], 10) - 1;
 
-            let x, y;
             if (boardOrientation === 'white') {
-                x = file * SQUARE_SIZE + SQUARE_SIZE / 2;
-                y = (7 - rank) * SQUARE_SIZE + SQUARE_SIZE / 2;
-            } else {
-                x = (7 - file) * SQUARE_SIZE + SQUARE_SIZE / 2;
-                y = rank * SQUARE_SIZE + SQUARE_SIZE / 2;
+                return { x: file * s + s / 2, y: (7 - rank) * s + s / 2 };
             }
-
-            return { x, y };
+            return { x: (7 - file) * s + s / 2, y: rank * s + s / 2 };
         }
 
-        // Draw arrows for moves
-        function drawArrows(moves) {
-            const svg = document.getElementById('arrow-svg');
+        function arrowColor(probability) {
+            const minP = 0.2;
+            const ratio = Math.max(0, Math.min(1, (probability - minP) / (1 - minP)));
+            const hue = 28 + ratio * 95;
+            return `hsl(${hue}, 75%, 42%)`;
+        }
+
+        function drawArrows(suggestions) {
+            const svg = document.getElementById('arrow-layer');
             svg.innerHTML = '';
+            svg.setAttribute('viewBox', `0 0 ${boardSize()} ${boardSize()}`);
 
-            if (moves.length === 0) return;
+            if (!suggestions || !suggestions.length) {
+                return;
+            }
 
-            // Create defs for arrowhead markers
             const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+            svg.appendChild(defs);
 
-            moves.forEach((move, idx) => {
-                // Create unique marker for each arrow
+            suggestions.forEach((item, idx) => {
                 const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
-                marker.setAttribute('id', `arrowhead-${idx}`);
-                marker.setAttribute('markerWidth', '4');
-                marker.setAttribute('markerHeight', '4');
-                marker.setAttribute('refX', '3');
-                marker.setAttribute('refY', '2');
+                marker.setAttribute('id', `ah-${idx}`);
+                marker.setAttribute('markerWidth', '8');
+                marker.setAttribute('markerHeight', '8');
+                marker.setAttribute('refX', '6.5');
+                marker.setAttribute('refY', '4');
                 marker.setAttribute('orient', 'auto');
 
-                const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-                polygon.setAttribute('points', '0 0, 4 2, 0 4');
-                const color = move.legal ? getArrowColor(move.probability, moves[0].probability) : '#e74c3c';
-                polygon.setAttribute('fill', color);
-
-                marker.appendChild(polygon);
+                const poly = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+                poly.setAttribute('points', '0 0, 8 4, 0 8');
+                poly.setAttribute('fill', arrowColor(item.probability));
+                marker.appendChild(poly);
                 defs.appendChild(marker);
             });
 
-            svg.appendChild(defs);
-
-            // Draw arrows
-            moves.forEach((move, idx) => {
-                const from = move.move.substring(0, 2);
-                const to = move.move.substring(2, 4);
-
+            suggestions.forEach((item, idx) => {
+                const from = item.move.slice(0, 2);
+                const to = item.move.slice(2, 4);
                 const fromPos = getSquareCenter(from);
                 const toPos = getSquareCenter(to);
 
-                // Shorten arrow to not overlap with pieces
                 const dx = toPos.x - fromPos.x;
                 const dy = toPos.y - fromPos.y;
-                const len = Math.sqrt(dx * dx + dy * dy);
-                const offset = 15;
+                const length = Math.max(1, Math.hypot(dx, dy));
+                const offset = boardSize() * 0.035;
 
-                const startX = fromPos.x + (dx / len) * offset;
-                const startY = fromPos.y + (dy / len) * offset;
-                const endX = toPos.x - (dx / len) * offset;
-                const endY = toPos.y - (dy / len) * offset;
+                const x1 = fromPos.x + (dx / length) * offset;
+                const y1 = fromPos.y + (dy / length) * offset;
+                const x2 = toPos.x - (dx / length) * offset;
+                const y2 = toPos.y - (dy / length) * offset;
 
                 const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-                line.setAttribute('x1', startX);
-                line.setAttribute('y1', startY);
-                line.setAttribute('x2', endX);
-                line.setAttribute('y2', endY);
-
-                // Opacity and width based on probability
-                const opacity = 0.3 + 0.7 * (move.probability / moves[0].probability);
-                const width = 3 + 5 * (move.probability / moves[0].probability);
-
-                const color = move.legal ? getArrowColor(move.probability, moves[0].probability) : '#e74c3c';
-                line.setAttribute('stroke', color);
-                line.setAttribute('stroke-width', width);
-                line.setAttribute('stroke-opacity', opacity);
-                line.setAttribute('marker-end', `url(#arrowhead-${idx})`);
-
+                line.setAttribute('x1', x1);
+                line.setAttribute('y1', y1);
+                line.setAttribute('x2', x2);
+                line.setAttribute('y2', y2);
+                line.setAttribute('stroke', arrowColor(item.probability));
+                line.setAttribute('stroke-width', (2 + item.probability * 8).toFixed(2));
+                line.setAttribute('stroke-linecap', 'round');
+                line.setAttribute('stroke-opacity', '0.88');
+                line.setAttribute('marker-end', `url(#ah-${idx})`);
                 svg.appendChild(line);
             });
         }
 
-        // Get arrow color based on probability (green for high, yellow for low)
-        function getArrowColor(prob, maxProb) {
-            const ratio = prob / maxProb;
-            // Interpolate from yellow (#f4d03f) to green (#2ecc71)
-            const r = Math.round(244 - (244 - 46) * ratio);
-            const g = Math.round(208 + (204 - 208) * ratio);
-            const b = Math.round(63 + (113 - 63) * ratio);
-            return `rgb(${r}, ${g}, ${b})`;
-        }
+        function renderTopMoves(frame) {
+            const tbody = document.querySelector('#top-moves-table tbody');
+            tbody.innerHTML = '';
 
-        // Update move list display
-        function updateMoveList(moves) {
-            const list = document.getElementById('move-list');
-            list.innerHTML = '';
-
-            moves.forEach(move => {
-                const div = document.createElement('div');
-                div.className = 'move-item';
-
-                const probPercent = (move.probability * 100).toFixed(1);
-                const illegalStyle = move.legal ? '' : 'color: #e74c3c; text-decoration: line-through;';
-                const illegalLabel = move.legal ? '' : ' (illegal)';
-                div.innerHTML = `
-                    <span class="move-name" style="${illegalStyle}">${move.move}${illegalLabel}</span>
-                    <span class="move-prob" style="${illegalStyle}">${probPercent}%</span>
-                `;
-
-                const bar = document.createElement('div');
-                bar.className = 'prob-bar';
-                bar.style.width = `${move.probability * 100 / moves[0].probability * 100}%`;
-                bar.style.background = move.legal ? '#4ecca3' : '#e74c3c';
-                div.appendChild(bar);
-
-                list.appendChild(div);
-            });
-        }
-
-        // Update turn indicator
-        function updateTurnIndicator() {
-            const indicator = document.getElementById('turn-indicator');
-            if (game.turn() === 'w') {
-                indicator.textContent = 'White to move';
-                indicator.className = 'turn-indicator turn-white';
-            } else {
-                indicator.textContent = 'Black to move';
-                indicator.className = 'turn-indicator turn-black';
-            }
-
-            if (game.game_over()) {
-                if (game.in_checkmate()) {
-                    indicator.textContent = (game.turn() === 'w' ? 'Black' : 'White') + ' wins!';
-                } else {
-                    indicator.textContent = 'Draw';
-                }
-            }
-        }
-
-        // Fetch predictions and update display
-        async function updateDisplay() {
-            updateTurnIndicator();
-            document.getElementById('fen-input').value = game.fen();
-
-            if (game.game_over()) {
-                drawArrows([]);
-                updateMoveList([]);
+            const moves = frame?.top_moves || [];
+            if (!moves.length) {
+                const tr = document.createElement('tr');
+                const msg = (frame && frame.to_move && !frame.chosen_move)
+                    ? 'No computed analysis yet. Press Step +1 or Play.'
+                    : 'No moves (game over).';
+                tr.innerHTML = `<td colspan="2" class="muted">${msg}</td>`;
+                tbody.appendChild(tr);
                 return;
             }
 
-            const topN = document.getElementById('top-n').value;
-            const response = await fetch(`/api/predict?fen=${encodeURIComponent(game.fen())}&top_n=${topN}`);
-            const data = await response.json();
-
-            drawArrows(data.moves);
-            updateMoveList(data.moves);
+            moves.forEach((m) => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `<td style="font-family:'Source Code Pro',monospace;">${m.move}</td><td>${(m.probability * 100).toFixed(1)}%</td>`;
+                tbody.appendChild(tr);
+            });
         }
 
-        // Sample a move from the model
-        async function sampleMove(temperature) {
-            if (game.game_over()) return;
+        function renderMoveList() {
+            const tbody = document.querySelector('#moves-table tbody');
+            tbody.innerHTML = '';
 
-            const response = await fetch('/api/sample', {
+            if (!frames.length) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = '<td colspan="3" class="muted">No moves yet.</td>';
+                tbody.appendChild(tr);
+                return;
+            }
+
+            const plyMoves = frames
+                .filter((f) => f.chosen_san)
+                .map((f) => f.chosen_san);
+
+            for (let i = 0; i < plyMoves.length; i += 2) {
+                const moveNumber = Math.floor(i / 2) + 1;
+                const whiteMove = plyMoves[i] || '';
+                const blackMove = plyMoves[i + 1] || '';
+
+                const tr = document.createElement('tr');
+                const activePly = Math.max(0, currentFrame - 1);
+                if (i === activePly || i + 1 === activePly) {
+                    tr.classList.add('active');
+                }
+                tr.innerHTML = `<td>${moveNumber}</td><td>${whiteMove}</td><td>${blackMove}</td>`;
+                tbody.appendChild(tr);
+            }
+        }
+
+        function updateStatus(frame) {
+            const turnChip = document.getElementById('turn-chip');
+            const plyChip = document.getElementById('ply-chip');
+            const resultChip = document.getElementById('result-chip');
+            const engineTag = document.getElementById('active-engine');
+
+            plyChip.textContent = `Ply ${frame?.ply ?? 0}`;
+
+            if (!matchData) {
+                turnChip.textContent = 'White to move';
+                turnChip.className = 'chip white';
+                resultChip.textContent = 'No match loaded';
+                engineTag.textContent = '';
+                return;
+            }
+
+            if (!frame || !frame.to_move) {
+                turnChip.textContent = 'Game over';
+                turnChip.className = 'chip';
+            } else if (frame.to_move === 'white') {
+                turnChip.textContent = 'White to move';
+                turnChip.className = 'chip white';
+            } else {
+                turnChip.textContent = 'Black to move';
+                turnChip.className = 'chip black';
+            }
+
+            const m = matchData.match;
+            if (m?.result && m?.termination) {
+                resultChip.textContent = `${m.result} (${m.termination})`;
+            } else {
+                resultChip.textContent = 'In progress';
+            }
+            engineTag.textContent = frame?.engine ? `Engine: ${frame.engine}` : '';
+        }
+
+        function renderCurrentFrame() {
+            if (!frames.length) {
+                board.position('start');
+                drawArrows([]);
+                renderTopMoves(null);
+                renderMoveList();
+                updateStatus(null);
+                return;
+            }
+
+            const frame = frames[currentFrame];
+            board.position(frame.fen, false);
+            drawArrows(frame.suggestions || []);
+            renderTopMoves(frame);
+            renderMoveList();
+            updateStatus(frame);
+        }
+
+        function stopPlayback() {
+            isPlaying = false;
+            if (playTimer) {
+                clearTimeout(playTimer);
+                playTimer = null;
+            }
+            document.getElementById('play-pause').textContent = 'Play';
+        }
+
+        function currentDelayMs() {
+            if (document.getElementById('max-speed').checked) {
+                return 0;
+            }
+            return parseInt(document.getElementById('speed-ms').value, 10);
+        }
+
+        function applyMatchSnapshot(snapshot, jumpToEnd = true) {
+            matchData = snapshot || null;
+            frames = snapshot?.match?.trace || [];
+            if (jumpToEnd) {
+                currentFrame = Math.max(0, frames.length - 1);
+            } else {
+                currentFrame = Math.max(0, Math.min(currentFrame, Math.max(0, frames.length - 1)));
+            }
+            renderCurrentFrame();
+        }
+
+        async function computeNextMove() {
+            if (!matchSessionId || stepInFlight) {
+                return false;
+            }
+            if (matchData?.match?.done) {
+                return false;
+            }
+
+            stepInFlight = true;
+            const beforePlies = matchData?.match?.plies ?? 0;
+            setProgress(`Computing next move... ${beforePlies} plies so far`);
+            try {
+                const snapshot = await postJSON(`/api/match_step/${matchSessionId}`, {});
+                applyMatchSnapshot(snapshot, true);
+                const plies = snapshot?.match?.plies ?? 0;
+                const moves = Math.floor(plies / 2);
+                if (snapshot?.match?.done) {
+                    setProgress(`Game complete: ${moves} moves (${plies} plies).`);
+                    return false;
+                }
+                setProgress(`Computed ${moves} moves (${plies} plies) so far.`);
+                return true;
+            } catch (err) {
+                setError(err.message);
+                return false;
+            } finally {
+                stepInFlight = false;
+            }
+        }
+
+        function schedulePlayback() {
+            if (!isPlaying) {
+                return;
+            }
+
+            playTimer = setTimeout(async () => {
+                if (!isPlaying) {
+                    return;
+                }
+
+                let advanced = false;
+                if (currentFrame < frames.length - 1) {
+                    currentFrame += 1;
+                    renderCurrentFrame();
+                    advanced = true;
+                } else {
+                    advanced = await computeNextMove();
+                }
+
+                if (!advanced) {
+                    stopPlayback();
+                    return;
+                }
+                schedulePlayback();
+            }, currentDelayMs());
+        }
+
+        function togglePlayback() {
+            if (!matchSessionId) {
+                return;
+            }
+
+            if (isPlaying) {
+                stopPlayback();
+                return;
+            }
+
+            isPlaying = true;
+            document.getElementById('play-pause').textContent = 'Pause';
+            schedulePlayback();
+        }
+
+        async function step(delta) {
+            if (!matchSessionId) {
+                return;
+            }
+            stopPlayback();
+
+            if (delta < 0) {
+                currentFrame = Math.max(0, currentFrame + delta);
+                renderCurrentFrame();
+                return;
+            }
+
+            if (currentFrame < frames.length - 1) {
+                currentFrame += delta;
+                if (currentFrame >= frames.length) {
+                    currentFrame = frames.length - 1;
+                }
+                renderCurrentFrame();
+                return;
+            }
+
+            await computeNextMove();
+        }
+
+        function engineConfig(side) {
+            const kind = document.getElementById(`${side}-kind`).value;
+            const temp = parseFloat(document.querySelector(`input[name="${side}-temp"]:checked`).value);
+
+            if (kind === 'policy') {
+                return {
+                    kind,
+                    checkpoint: document.getElementById(`${side}-checkpoint`).value.trim(),
+                    temperature: temp,
+                };
+            }
+
+            return {
+                kind,
+                eval_name: document.getElementById(`${side}-eval`).value,
+                depth: parseInt(document.getElementById(`${side}-depth`).value, 10),
+                temperature: temp,
+            };
+        }
+
+        function updateEngineVisibility(side) {
+            const kind = document.getElementById(`${side}-kind`).value;
+            document.getElementById(`${side}-policy-fields`).style.display = kind === 'policy' ? 'block' : 'none';
+            document.getElementById(`${side}-negamax-fields`).style.display = kind === 'negamax' ? 'block' : 'none';
+        }
+
+        function populateOpenings(openings) {
+            openingsById = {};
+            const select = document.getElementById('opening-select');
+            select.innerHTML = '';
+
+            const startOption = document.createElement('option');
+            startOption.value = '';
+            startOption.textContent = 'Start position';
+            select.appendChild(startOption);
+
+            (openings || []).forEach((op) => {
+                openingsById[op.id] = op;
+                const option = document.createElement('option');
+                option.value = op.id;
+                option.textContent = `${op.name} (${op.eco})`;
+                select.appendChild(option);
+            });
+        }
+
+        function applySelectedOpening() {
+            const select = document.getElementById('opening-select');
+            const opId = select.value;
+            selectedOpeningId = opId;
+            if (!opId) {
+                document.getElementById('start-fen').value = defaultStartFen;
+                setProgress('Using start position.');
+                return;
+            }
+
+            const op = openingsById[opId];
+            if (!op) {
+                return;
+            }
+            document.getElementById('start-fen').value = op.fen;
+            const sanLine = (op.moves_san || []).join(' ');
+            setProgress(`Using opening: ${op.name} (${op.eco}) - ${sanLine}`);
+        }
+
+        async function postJSON(path, payload) {
+            const response = await fetch(path, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    fen: game.fen(),
-                    temperature: temperature
-                })
+                body: JSON.stringify(payload),
             });
             const data = await response.json();
-
-            // Make the move
-            const from = data.move.substring(0, 2);
-            const to = data.move.substring(2, 4);
-            const promotion = data.move.length > 4 ? data.move[4] : undefined;
-
-            game.move({ from, to, promotion });
-            board.position(game.fen());
-            updateDisplay();
+            if (!response.ok) {
+                throw new Error(data.error || `Request failed (${response.status})`);
+            }
+            return data;
         }
 
-        // Event listeners
-        document.getElementById('top-n').addEventListener('input', (e) => {
-            document.getElementById('top-n-value').textContent = e.target.value;
-            updateDisplay();
-        });
+        function setBusy(isBusy) {
+            document.getElementById('run-match').disabled = isBusy;
+            document.getElementById('run-series').disabled = isBusy;
+        }
 
-        document.getElementById('sample-greedy').addEventListener('click', () => sampleMove(0));
-        document.getElementById('sample-random').addEventListener('click', () => sampleMove(1));
+        function stopSeriesPolling() {
+            if (seriesPollTimer) {
+                clearTimeout(seriesPollTimer);
+                seriesPollTimer = null;
+            }
+        }
 
-        document.getElementById('reset-btn').addEventListener('click', () => {
-            game.reset();
-            board.position('start');
-            updateDisplay();
-        });
+        async function runMatch() {
+            setError('');
+            setProgress('');
+            stopPlayback();
+            setBusy(true);
 
-        document.getElementById('flip-btn').addEventListener('click', () => {
+            try {
+                const payload = {
+                    white: engineConfig('white'),
+                    black: engineConfig('black'),
+                    max_plies: parseInt(document.getElementById('max-plies').value, 10),
+                    start_fen: document.getElementById('start-fen').value.trim(),
+                    opening_id: selectedOpeningId || undefined,
+                    min_arrow_probability: 0.2,
+                };
+
+                const snapshot = await postJSON('/api/run_match', payload);
+                matchSessionId = snapshot.session_id;
+                if (!matchSessionId) {
+                    throw new Error('Server did not return a session id');
+                }
+                applyMatchSnapshot(snapshot, true);
+                setProgress('Match initialized. Press Play or Step +1 to compute moves.');
+            } catch (err) {
+                setError(err.message);
+                setProgress('');
+            } finally {
+                setBusy(false);
+            }
+        }
+
+        async function runSeries() {
+            setError('');
+            stopSeriesPolling();
+            setBusy(true);
+            setSeriesProgress(0, 0, '');
+
+            try {
+                const useDiverseOpenings = document.getElementById('series-diverse-openings').checked;
+                const seriesStartFen = defaultStartFen;
+                const payload = {
+                    model_a: engineConfig('white'),
+                    model_b: engineConfig('black'),
+                    games: parseInt(document.getElementById('series-games').value, 10),
+                    swap_colors: document.getElementById('swap-colors').checked,
+                    use_diverse_openings: useDiverseOpenings,
+                    max_plies: parseInt(document.getElementById('max-plies').value, 10),
+                    start_fen: seriesStartFen,
+                    min_arrow_probability: 0.2,
+                };
+
+                const kickoff = await postJSON('/api/run_series', payload);
+                const jobId = kickoff.job_id;
+                if (!jobId) {
+                    throw new Error('Server did not return a series job id');
+                }
+                setSeriesProgress(0, kickoff.games_total || 0, 'starting');
+                pollSeriesStatus(jobId);
+            } catch (err) {
+                setError(err.message);
+                setBusy(false);
+            }
+        }
+
+        async function pollSeriesStatus(jobId) {
+            try {
+                const response = await fetch(`/api/run_series_status/${jobId}`);
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to fetch series status');
+                }
+
+                setSeriesProgress(data.games_done || 0, data.games_total || 0, data.current_opening || '');
+
+                if (data.status === 'running') {
+                    seriesPollTimer = setTimeout(() => pollSeriesStatus(jobId), 350);
+                    return;
+                }
+
+                if (data.status === 'done') {
+                    renderSeriesTable(data.summary || {});
+                    setBusy(false);
+                    return;
+                }
+
+                if (data.status === 'error') {
+                    throw new Error(data.error || 'Series job failed');
+                }
+
+                throw new Error(`Unknown series status: ${data.status}`);
+            } catch (err) {
+                setError(err.message);
+                setBusy(false);
+            }
+        }
+
+        function renderSeriesTable(summary) {
+            const tbody = document.querySelector('#series-table tbody');
+            tbody.innerHTML = '';
+
+            const modelNames = Object.keys(summary.by_model || {});
+            if (!modelNames.length) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = '<td colspan="5" class="muted">No data.</td>';
+                tbody.appendChild(tr);
+                return;
+            }
+
+            modelNames.forEach((name) => {
+                const s = summary.by_model[name];
+                const tr = document.createElement('tr');
+                tr.innerHTML = [
+                    `<td>${name}</td>`,
+                    `<td>${s.wins}</td>`,
+                    `<td>${s.losses}</td>`,
+                    `<td>${s.draws}</td>`,
+                    `<td>${(s.win_rate * 100).toFixed(1)}%</td>`,
+                ].join('');
+                tbody.appendChild(tr);
+            });
+        }
+
+        function initBoard() {
+            board = Chessboard('board', {
+                draggable: false,
+                position: 'start',
+                orientation: boardOrientation,
+                pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png',
+            });
+        }
+
+        function refreshBoardSize() {
+            if (!board) {
+                return;
+            }
+            board.resize();
+            renderCurrentFrame();
+        }
+
+        async function loadDefaults() {
+            try {
+                const response = await fetch('/api/config');
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to load config');
+                }
+
+                const defaults = data.defaults || {};
+                document.getElementById('max-plies').value = defaults.max_plies ?? 300;
+                defaultStartFen = defaults.start_fen || defaultStartFen;
+                document.getElementById('start-fen').value = defaultStartFen;
+                const defaultCheckpoint = defaults.default_policy_checkpoint || '';
+                if (defaultCheckpoint) {
+                    document.getElementById('white-checkpoint').value = defaultCheckpoint;
+                    document.getElementById('black-checkpoint').value = defaultCheckpoint;
+                }
+                populateOpenings(data.openings || []);
+                document.getElementById('opening-select').value = '';
+
+                if (Array.isArray(data.classical_eval_options) && data.classical_eval_options.length) {
+                    for (const side of ['white', 'black']) {
+                        const select = document.getElementById(`${side}-eval`);
+                        select.innerHTML = '';
+                        data.classical_eval_options.forEach((name) => {
+                            const option = document.createElement('option');
+                            option.value = name;
+                            option.textContent = name;
+                            select.appendChild(option);
+                        });
+                    }
+                }
+            } catch (err) {
+                setError(err.message);
+            }
+        }
+
+        document.getElementById('play-pause').addEventListener('click', togglePlayback);
+        document.getElementById('step-back').addEventListener('click', () => step(-1));
+        document.getElementById('step-forward').addEventListener('click', () => step(1));
+        document.getElementById('flip-board').addEventListener('click', () => {
             boardOrientation = boardOrientation === 'white' ? 'black' : 'white';
             board.orientation(boardOrientation);
-            updateDisplay();
+            renderCurrentFrame();
         });
 
-        document.getElementById('undo-btn').addEventListener('click', () => {
-            game.undo();
-            board.position(game.fen());
-            updateDisplay();
+        document.getElementById('run-match').addEventListener('click', runMatch);
+        document.getElementById('run-series').addEventListener('click', runSeries);
+        document.getElementById('use-opening').addEventListener('click', applySelectedOpening);
+        document.getElementById('opening-select').addEventListener('change', () => {
+            selectedOpeningId = document.getElementById('opening-select').value;
+            applySelectedOpening();
         });
 
-        document.getElementById('set-fen-btn').addEventListener('click', () => {
-            const fen = document.getElementById('fen-input').value.trim();
-            if (game.load(fen)) {
-                board.position(fen);
-                updateDisplay();
+        document.getElementById('reset-view').addEventListener('click', () => {
+            stopPlayback();
+            stopSeriesPolling();
+            matchData = null;
+            matchSessionId = null;
+            frames = [];
+            currentFrame = 0;
+            stepInFlight = false;
+            renderCurrentFrame();
+            setError('');
+            setProgress('');
+            setSeriesProgress(0, 0, '');
+            setBusy(false);
+        });
+
+        document.getElementById('speed-ms').addEventListener('input', (event) => {
+            document.getElementById('speed-value').textContent = `${event.target.value}ms`;
+        });
+
+        document.getElementById('max-speed').addEventListener('change', (event) => {
+            const slider = document.getElementById('speed-ms');
+            slider.disabled = event.target.checked;
+            document.getElementById('speed-value').textContent = event.target.checked
+                ? 'MAX'
+                : `${slider.value}ms`;
+        });
+        document.getElementById('series-diverse-openings').addEventListener('change', (event) => {
+            const enabled = event.target.checked;
+            document.getElementById('series-games').disabled = enabled;
+            document.getElementById('swap-colors').disabled = enabled;
+            if (enabled) {
+                setSeriesProgress(0, Object.keys(openingsById).length * 2, 'diverse openings mode');
             } else {
-                alert('Invalid FEN');
+                setSeriesProgress(0, 0, '');
+            }
+        });
+        document.getElementById('start-fen').addEventListener('input', () => {
+            const select = document.getElementById('opening-select');
+            if (select.value) {
+                select.value = '';
+                selectedOpeningId = '';
             }
         });
 
-        document.getElementById('fen-input').addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') {
-                document.getElementById('set-fen-btn').click();
-            }
-        });
+        for (const side of ['white', 'black']) {
+            document.getElementById(`${side}-kind`).addEventListener('change', () => updateEngineVisibility(side));
+            updateEngineVisibility(side);
+        }
 
-        // Initialize
+        window.addEventListener('resize', refreshBoardSize);
+
         initBoard();
-        updateDisplay();
+        renderCurrentFrame();
+        loadDefaults();
     </script>
 </body>
 </html>

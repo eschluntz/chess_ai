@@ -62,6 +62,14 @@ python interface/data_server.py --data cache/planes/full --port 5001
 ```
 Then open http://localhost:5001. Arrow keys to navigate, R for random, hover arrows for probabilities.
 
+**Run policy head-to-head arena locally:**
+```bash
+python interface/server.py --vocab cache/planes/vocab.npy --port 5000
+```
+Then open http://localhost:5000.
+
+See `interface/README.md` for CLI series mode and checkpoint download examples.
+
 ## Dataset
 
 Source: [Lichess/chess-position-evaluations](https://huggingface.co/datasets/Lichess/chess-position-evaluations)
