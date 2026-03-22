@@ -187,6 +187,8 @@ Iterations:
 - 14-27 layers (enough depth for full-board receptive field)
 - Scale via width, not extreme depth
 
+**Caveat (2026-03)**: This predates BF16, prefetch, flip, RMSNorm, wd, and cosine decay. L=14 was carried forward from here but the 20M_med vs 20M_wide gap (0.16pp) is within noise. Worth re-sweeping depth under the modern recipe when moving to transformers.
+
 ![Deep vs wide comparison](img/cnn_deep_vs_wide.png)
 
 **Next steps**: Run promising configs (20M_med, 20M_wide, 30M_wide) for longer (4-6 hours) to see if larger models can catch up.
@@ -222,6 +224,8 @@ Iterations:
 
 **Selected**: batch_size=1024 for 24hr scaling experiment.
 
+**Caveat (2026-03)**: LR was held constant at 1e-3 across all batch sizes — standard practice scales LR with batch size (linear or sqrt). "No critical batch size observed" can't be concluded when LR wasn't adjusted. Worth re-sweeping with LR scaling when moving to transformers.
+
 ## 2026-01-17: Learning Rate Sweep
 
 **Goal**: Find optimal learning rate for bs=1024 before 24hr scaling runs.
@@ -244,7 +248,7 @@ Iterations:
 
 ### Conclusions
 
-- **lr=0.001 confirmed**: Current default is optimal. 3e-4 is slightly slower, 3e-3 is too high.
+- **3e-3 is too high** (clearly ~2pp worse). 1e-3 vs 3e-4 differ by only 0.4pp — likely within noise. Sticking with 1e-3 as default but not strongly preferred over 3e-4.
 
 **Final config for 24hr scaling**: K=3, L=14, bs=1024, lr=0.001, A10G.
 
@@ -503,7 +507,7 @@ Reached **35%+ eval accuracy** at ~7k steps with `min_depth=0`. However, this is
 
 2. **GPU utilization near ceiling**: 90% util means the remaining bottleneck is the eval pauses every 2 minutes plus unavoidable overhead. Little room for further data loading optimization.
 
-3. **Variance nearly eliminated**: With I/O no longer the bottleneck, machine-to-machine disk speed differences don't matter. Runs are now reproducible enough for single-run comparisons even on wall-clock time.
+3. **Variance substantially reduced but not eliminated**: Dropped from ~11% to ~3% in this test. Later experiments (e.g., the 2026-03 head sweep showed a 29% throughput spread between runs with only ~4% FLOP difference) suggest outlier machines still occur. Single-run wall-clock comparisons are better than before but still need skepticism for sub-1pp differences.
 
 ## 2026-02-11: Mixed Precision Training (BF16/FP16)
 
@@ -669,6 +673,8 @@ When it's black's turn, normalize the board to the current player's perspective:
 
 **Larger models learn faster per sample** — log slopes increase monotonically with model size (0.032 → 0.062). They just haven't seen enough data in 10 hours.
 
+**Caveat**: The 10× projections extrapolate an order of magnitude beyond observed data. High R² over short ranges doesn't validate long-range extrapolation — treat the @10x column as directional, not a prediction.
+
 ### Conclusions
 
 1. **Not saturating**: The architecture and data can support much higher accuracy. The constraint is training compute.
@@ -682,6 +688,130 @@ When it's black's turn, normalize the board to the current player's perspective:
 5. **Single runs — throughput noise present but not outcome-changing**: The 10M model inexplicably ran slower than 20M (likely a slow Modal machine). However, the spacing between lines is large enough that ±15% horizontal stretch wouldn't change rankings, except for the 20M/40M tie which needs longer training to break.
 
 **Next steps**: Run 40M for 24-48 hours with cosine decay matched to the longer duration, or use constant LR to see true scaling behavior without schedule artifacts.
+
+## 2026-02-28: Output Head Bottleneck (head_channels sweep)
+
+**Goal**: The flatten head `Linear(H*64, M)` consumes ~79% of total params at H=128 (16.1M of 20.5M). Test whether shrinking the head and reinvesting freed params into conv width improves accuracy.
+
+**Setup**:
+- Architecture: K=3, L=14, param-matched to ~20.5M total
+- Head: 1×1 conv reduction `Conv(H→Cs) → GELU → Linear(Cs*64, M)` before output
+- Training: constant LR (no schedule confound), bs=1024, lr=0.001, wd=0.01, 40k steps, full dataset, flip
+
+| config | head_ch | H | conv params | FLOPs vs baseline |
+|--------|---------|---|-------------|-------------------|
+| headch-none-H128 | None | 128 | 4.4M | 1.0× (exact baseline) |
+| headch-128-H128 | 128 | 128 | 4.4M | 1.0× (isolates extra-layer effect) |
+| headch-16-H267 | 16 | 267 | 18.5M | 4.1× (rank-deficient: 16×64=1024 < 1968) |
+| headch-32-H252 | 32 | 252 | 16.5M | 3.7× |
+| headch-64-H218 | 64 | 218 | 12.4M | 2.8× |
+
+**Design flaw (in hindsight)**: Conv FLOPs = params × 64 (one op per spatial position); Linear FLOPs ≈ params. Shifting params from the linear head to the conv backbone multiplies FLOPs ~64× per param moved. So param-matched ≠ FLOP-matched — wider configs cost 2.8–4.1× more compute. Since training is FLOPs-constrained not param-constrained, this experiment answers the wrong question. A FLOPs-matched design would have been cleaner.
+
+### Results
+
+- **Per-step**: headch-64 beat baseline by ~1.9pp (noise-checked: bands separate). headch-none ≈ headch-128 (sanity check passed). headch-16 tied baseline per-step despite having 4× the conv params — the rank deficiency (16×64=1024 < 1968) ate all the backbone gains.
+- **Per-time**: headch-none and headch-128 did best. Wider configs' FLOP overhead more than ate the capacity gain. headch-16 is clearly worst on compute — 4.1× FLOPs for zero accuracy improvement.
+
+### Conclusions
+
+1. **Head bottleneck is real but weak**. Per-step gain from reinvesting head params into backbone is ~1.9pp, but on a time/FLOPs basis the trade doesn't pay off.
+2. **Rank matters**: headch-16's failure to gain anything from 4× the conv params confirms the head needs ≥~31 channels (31×64 ≥ 1968) to span the output space.
+3. **Lesson: hold FLOPs constant, not params.** Superseded by the next experiment which fixes the backbone and varies only the head.
+
+## 2026-03-01: Output Head Architecture Comparison
+
+**Goal**: Compare 6 output head designs at fixed backbone (H=128) to isolate head effect without the FLOPs confound from the previous sweep. This is a compression test: how far can head params shrink before accuracy drops?
+
+**Setup**:
+- Backbone: K=3, L=14, H=128 (4.38M conv params), identical across all runs
+- Training: constant LR, bs=1024, lr=0.001, wd=0.01, 2 hours, full dataset, flip
+- ~iso-FLOPs: max spread 5.5% (flatten head is 16.1M FLOPs vs <1.1M for others; backbone is ~280M)
+
+| head_type | mechanism | head params | head% | total |
+|-----------|-----------|-------------|-------|-------|
+| flatten | `Linear(C*64, M)` | 16.1M | 78.6% | 20.5M |
+| reduce | `Conv1×1(C→32) → Linear(32*64, M)` | 4.0M | 48.0% | 8.4M |
+| spatial_shared | `Conv1×1(C→68)` + gather | 17K | 0.4% | 4.4M |
+| spatial_unshared | per-square `(64, C, 68)` einsum + gather | 570K | 11.5% | 5.0M |
+| bilinear | two `Conv1×1(C→64)`, dot product | 25K | 0.6% | 4.4M |
+| factored | two `Linear(C*64, 64)`, score=f[from]+g[to] | 1.1M | 19.4% | 5.4M |
+
+**Head mechanics**:
+- `flatten`/`reduce`: global linear, each output logit sees all 64 squares' features
+- `spatial_*`: logit(f→t) depends only on features at the **from** square. 68 planes = 64 dest + 4 promo-type corrections (additive: `logit(f→t,p) = out[f,t] + out[f,64+p-1]`). Originally used 320 planes (64×5 promo codes) but 70% were dead — promo destinations off the back rank have no vocab entry.
+- `bilinear`: logit(f→t) = ⟨f_proj[from], t_proj[to]⟩ — uses features at **both** endpoints. Promo distinguished only by 5 global scalars (weak).
+- `factored`: logit = from_head[from] + to_head[to]. Cannot represent from×to interaction. Lower-bound baseline.
+
+**What "winning" means**: At fixed backbone, cheap heads will likely lose a bit in absolute terms. The question is the gap. If a ~20K-param head comes within ~0.5pp of the 16M-param flatten head, we've found a near-free head and can reinvest 16M params into conv width in the next experiment — which (per the headch-64 result above) should buy ~1pp.
+
+### Results
+
+![Output head comparison](img/head_comparison.png)
+
+**Final (time-matched, 2h wall-clock):**
+
+| config | eval acc | deep acc | vs flatten | steps | throughput |
+|--------|----------|----------|------------|-------|------------|
+| head-reduce32 | **44.85%** | 52.51% | +0.36pp | 119k | 16.8/s |
+| head-spatial-unshared | 44.55% | 50.98% | +0.07pp | 95k | 13.4/s |
+| head-flatten | 44.49% | 52.15% | — | 92k | 13.0/s |
+| head-bilinear | 43.15% | 47.98% | -1.34pp | 59k | 8.3/s |
+| head-spatial-shared | 42.38% | 49.25% | -2.11pp | 96k | 13.5/s |
+| head-factored | 41.34% | 47.98% | -3.15pp | 120k | 17.0/s |
+
+**Step-matched at ~59k** (bilinear's final step — fairest per-capacity comparison):
+
+| config | eval acc | vs flatten |
+|--------|----------|------------|
+| head-spatial-unshared | 43.57% | **+0.19pp** |
+| head-flatten | 43.38% | — |
+| head-bilinear | 43.15% | -0.23pp |
+| head-reduce32 | 42.56% | -0.82pp |
+| head-spatial-shared | 40.90% | -2.48pp |
+| head-factored | 39.16% | -4.22pp |
+
+### Analysis
+
+**Top three are within noise of each other** — `flatten`, `spatial_unshared`, and `reduce32` all land within a 0.24pp spread on last-5 means, with overlapping bands. The 28× param difference between flatten (16.1M head) and spatial_unshared (570K head) buys nothing either way. The per-square decoder is sufficient; the global linear isn't adding anything.
+
+**Per-step and per-time rankings differ for the middle of the pack:**
+- `reduce32` learns slower per-step but got 30% more steps from higher throughput (16.8/s vs 13.0/s — likely inflated by Modal machine variance since the FLOP difference is only ~4%).
+- `bilinear` is nearly tied with flatten per-step (-0.23pp) but crushed on wall-clock — the `(B, 64, 1968)` intermediate tensor in the dot product dropped it to 8.3/s. Architecture is good, implementation is slow.
+
+**Diagnostic comparisons:**
+- Per-square specialization matters **a lot**: `spatial_unshared` is +2.7pp over `spatial_shared` per-step. Worth the 33× params.
+- Both-endpoint features help: `bilinear` is +2.25pp over `spatial_shared` per-step. Using features at the destination square, not just the source, adds real signal.
+- From×to interaction is essential: `factored` loses 4.2pp. The model needs to reason about the specific move, not origin and destination independently.
+- Weight sharing across source squares is too restrictive: `spatial_shared` loses 2.5pp. "Where should I go from here?" needs to know where "here" is. The AlphaZero-style shared policy head doesn't work well at this backbone depth.
+
+**Noise check (last-5 eval points):** Single final datapoints are misleading — eval jitter is 0.2–0.7pp per run. Comparing last-5 means with [min, max] bands:
+
+| | last-5 mean | band | overlaps flatten? |
+|---|---|---|---|
+| reduce32 | 44.68% | [44.44, 44.85] | yes |
+| spatial_unshared | 44.45% | [44.37, 44.55] | yes |
+| flatten | 44.44% | [44.27, 44.60] | — |
+| bilinear | 43.11% | [42.88, 43.33] | no |
+| spatial_shared | 42.39% | [42.27, 42.48] | no |
+| factored | 41.16% | [40.67, 41.34] | no |
+
+`flatten` and `spatial_unshared` differ by **0.01pp on means with fully overlapping bands** — genuinely identical. `reduce32`'s band also overlaps. The bottom three are cleanly separated; those findings are solid.
+
+**Deep-eval caveat**: `spatial_unshared` underperforms flatten on deep eval by -1.17pp (time-matched single-point). Not re-checked with 5-point averaging; possibly noise.
+
+### Conclusions
+
+1. **`flatten` ≈ `spatial_unshared`, stick with flatten for CNN work.** The +0.07 to +0.19pp difference is within noise. Flatten is simpler (no gather/mask logic) and the deep-eval hint slightly favors it.
+
+2. **The within-noise result is the actual finding: policy is local.** Per-square features at the from-square are sufficient to score moves — the global `Linear(8192, 1968)` view isn't adding anything. Confirmed from the other side by `factored` (-4.2pp, from×to interaction essential) and `spatial_shared` (-2.5pp, per-square specialization matters).
+
+3. **Head FLOPs become irrelevant as backbone scales.** Flatten head grows linearly in H (`H × 64 × 1968`) while backbone grows quadratically (`H² × 9 × 64 × 2L`). Head share at H=128 is 5.7%; at H=256 it's 3.0%; at H=512 it's 1.5%. Since training is FLOPs-constrained, not memory-constrained, the flatten head's param overhead doesn't matter and its FLOP overhead shrinks away.
+
+4. **Use `spatial_unshared` for the transformer.** There the flatten head would be `Linear(64 × d_model, 1968)` — 32M params at d_model=256, worse at larger d. The spatial head stays at ~1M and we've verified it doesn't cost accuracy.
+
+5. **`reduce32` is the low-risk speedup if wanted.** Best per-time (+0.36pp), still conceptually simple, fixed 4M head regardless of H. But the gain is small enough to not bother.
+
 
 - [x] ~~confirm the best strategy for combining duplicate rows (soft labels vs throw out non-max)~~
   - [x] ~~generate 50M and 250M datasets on modal~~

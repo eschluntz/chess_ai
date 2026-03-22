@@ -37,6 +37,9 @@ def train(
     hidden_channels: int = 128,
     num_layers: int = 14,
     kernel_size: int = 3,
+    head_type: str = "flatten",
+    head_channels: int = 32,
+    bilinear_dim: int = 64,
     batch_size: int = 1024,
     lr: float = 0.001,
     max_seconds: int = 0,
@@ -80,11 +83,12 @@ def train(
     print("=" * 60)
 
     # Load data from precomputed features
-    train_loader, eval_loader, eval_loader_deep, num_classes = get_dataloaders(
+    train_loader, eval_loader, eval_loader_deep, num_classes, vocab_moves = get_dataloaders(
         batch_size, num_samples=num_samples, min_depth=min_depth, flip_board=flip_board
     )
     total_samples = train_loader.num_samples
     num_moves = num_classes
+    vocab_t = torch.as_tensor(vocab_moves, dtype=torch.long)
     print(f"[{run_name}] Training on {total_samples:,} samples")
 
     # Create model
@@ -94,6 +98,10 @@ def train(
         num_layers=num_layers,
         kernel_size=kernel_size,
         flip_board=flip_board,
+        head_type=head_type,
+        head_channels=head_channels,
+        bilinear_dim=bilinear_dim,
+        vocab=vocab_t,
     ).to(device)
     model = torch.compile(model)
     criterion = nn.CrossEntropyLoss()
@@ -399,26 +407,41 @@ def train(
 
 @app.function(image=image, timeout=86000)  # 23.5 hours for sweep coordination
 def sweep():
-    """Model size scaling: 10M, 20M, 40M, 80M."""
+    """Output head comparison at fixed H=128 (isolates head effect, no backbone change).
+
+    All heads share the same 4.38M-param conv backbone; only the output head differs.
+    Since backbone FLOPs dominate, wall-clock ≈ step-matched here.
+
+    head params @ H=128:
+      flatten         16.1M  (baseline)
+      reduce(32)       4.0M
+      spatial_shared   17K   (68-plane: 64 dest + 4 promo-type, additive)
+      spatial_unshared 570K  (per-square 68-plane decoder)
+      bilinear(64)     25K   (16K convs + 8K norm + 5 promo_bias)
+      factored         1.1M
+    """
     configs = [
-        {"run_name": "scale-10M", "hidden_channels": 72},
-        {"run_name": "scale-20M", "hidden_channels": 128},
-        {"run_name": "scale-40M", "hidden_channels": 224},
-        {"run_name": "scale-80M", "hidden_channels": 364},
-        {"run_name": "scale-160M", "hidden_channels": 584},
+        {"run_name": "head-flatten",         "head_type": "flatten"},
+        {"run_name": "head-reduce32",        "head_type": "reduce",          "head_channels": 32},
+        {"run_name": "head-spatial-shared",  "head_type": "spatial_shared"},
+        {"run_name": "head-spatial-unshared","head_type": "spatial_unshared"},
+        {"run_name": "head-bilinear",        "head_type": "bilinear",        "bilinear_dim": 64},
+        {"run_name": "head-factored",        "head_type": "factored"},
     ]
 
     for cfg in configs:
+        cfg["hidden_channels"] = 128
         cfg["num_layers"] = 14
         cfg["kernel_size"] = 3
         cfg["batch_size"] = 1024
         cfg["lr"] = 0.001
         cfg["weight_decay"] = 0.01
-        cfg["cosine_decay"] = True
+        cfg["cosine_decay"] = False  # constant LR — no schedule confound
         cfg["num_samples"] = "full"
         cfg["min_depth"] = 0
         cfg["flip_board"] = True
-        cfg["max_seconds"] = 36000  # 10 hours
+        cfg["max_seconds"] = 7200  # 2 hours
+        cfg["max_steps"] = 0
 
     print(f"Launching {len(configs)} parallel runs:")
     for cfg in configs:
@@ -481,7 +504,7 @@ def bench_vram():
         target[:, 0] = 1.0
 
         try:
-            for i in range(3):
+            for _ in range(3):
                 optimizer.zero_grad()
                 with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
                     logits = model(planes, meta)
