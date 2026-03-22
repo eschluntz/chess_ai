@@ -263,8 +263,7 @@ def get_dataloaders(batch_size: int, num_samples: str = "full", min_depth: int =
         flip_board: If True, remap black's moves to flipped coordinates.
 
     Returns:
-        train_loader, eval_loader, eval_loader_deep, num_classes, vocab_moves
-        where vocab_moves is (num_classes, 3) int array of (from_sq, to_sq, promo).
+        train_loader, eval_loader, eval_loader_deep, num_classes
     """
     data_dir = CACHE_DIR / num_samples
 
@@ -310,4 +309,4 @@ def get_dataloaders(batch_size: int, num_samples: str = "full", min_depth: int =
     print(f"Eval (depth>=50): {eval_loader_deep.num_samples:,} positions ({eval_loader_deep.num_batches:,} batches)")
     print(f"Vocab: {num_classes:,} unique moves")
 
-    return train_loader, eval_loader, eval_loader_deep, num_classes, move_vocab.moves
+    return train_loader, eval_loader, eval_loader_deep, num_classes
