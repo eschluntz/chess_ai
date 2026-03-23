@@ -18,6 +18,7 @@ image = (
     .add_local_file("board_repr.py", "/root/board_repr.py")
     .add_local_file("mlp_model.py", "/root/mlp_model.py")
     .add_local_file("cnn_model.py", "/root/cnn_model.py")
+    .add_local_file("transformer_model.py", "/root/transformer_model.py")
 )
 
 data_volume = modal.Volume.from_name("chess-policy-output", create_if_missing=True)
@@ -34,9 +35,10 @@ checkpoint_volume = modal.Volume.from_name(
     timeout=86400,
 )
 def train(
-    hidden_channels: int = 128,
-    num_layers: int = 14,
-    kernel_size: int = 3,
+    n_embed: int = 256,
+    num_heads: int = 8,
+    ff_ratio: int = 4,
+    num_layers: int = 8,
     batch_size: int = 1024,
     lr: float = 0.001,
     max_seconds: int = 0,
@@ -46,9 +48,10 @@ def train(
     checkpoint_dir: str = "checkpoints",
     num_samples: str = "full",
     min_depth: int = 0,
-    flip_board: bool = False,
-    weight_decay: float = 0.0,
+    weight_decay: float = 0.01,
     cosine_decay: bool = False,
+    grad_clip: float = 1.0,
+    warmup_steps: int = 500,
 ):
     import sys
 
@@ -62,8 +65,7 @@ def train(
     import torch.optim as optim
     import wandb
 
-    # from mlp_model import PolicyMLP
-    from cnn_model import PolicyCNN
+    from transformer_model import Transformer, TransformerConfig
     from data import get_dataloaders
 
     is_modal = bool(os.environ.get("MODAL_TASK_ID"))
@@ -73,28 +75,29 @@ def train(
     print(f"[{run_name}] Using device: {device}")
 
     if run_name is None:
-        run_name = f"L{num_layers}_H{hidden_channels}_K{kernel_size}_B{batch_size}_LR{lr}_S{num_samples}"
+        run_name = f"tf_L{num_layers}_D{n_embed}_H{num_heads}_B{batch_size}_LR{lr}_S{num_samples}"
 
     print("=" * 60)
     print(f"[{run_name}] Policy Network Training")
     print("=" * 60)
 
-    # Load data from precomputed features
+    # Load data from precomputed features (flip always on — Transformer bakes it in)
     train_loader, eval_loader, eval_loader_deep, num_classes = get_dataloaders(
-        batch_size, num_samples=num_samples, min_depth=min_depth, flip_board=flip_board
+        batch_size, num_samples=num_samples, min_depth=min_depth, flip_board=True
     )
     total_samples = train_loader.num_samples
     num_moves = num_classes
     print(f"[{run_name}] Training on {total_samples:,} samples")
 
     # Create model
-    model = PolicyCNN(
-        num_moves=num_moves,
-        hidden_channels=hidden_channels,
+    cfg = TransformerConfig(
+        n_embed=n_embed,
+        num_heads=num_heads,
+        ff_ratio=ff_ratio,
         num_layers=num_layers,
-        kernel_size=kernel_size,
-        flip_board=flip_board,
-    ).to(device)
+        num_moves=num_moves,
+    )
+    model = Transformer(cfg).to(device)
     model = torch.compile(model)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -136,7 +139,7 @@ def train(
     num_params = sum(p.numel() for p in model.parameters())
 
     print(f"[{run_name}] Model: {num_params:,} parameters")
-    print(f"[{run_name}] Layers: {num_layers}, Hidden: {hidden_channels}")
+    print(f"[{run_name}] Layers: {num_layers}, d_model: {n_embed}, heads: {num_heads}, ff_ratio: {ff_ratio}")
     print(f"[{run_name}] Output classes: {num_moves}")
     print(f"[{run_name}] Batch size: {batch_size}, LR: {lr}")
     if max_steps:
@@ -169,15 +172,19 @@ def train(
         id=wandb_run_id,
         resume="allow" if wandb_run_id else None,
         config={
-            "hidden_channels": hidden_channels,
+            "n_embed": n_embed,
+            "num_heads": num_heads,
+            "ff_ratio": ff_ratio,
             "num_layers": num_layers,
-            "kernel_size": kernel_size,
             "batch_size": batch_size,
             "learning_rate": lr,
             "max_seconds": max_seconds,
             "num_params": num_params,
             "num_moves": num_moves,
             "total_samples": total_samples,
+            "grad_clip": grad_clip,
+            "warmup_steps": warmup_steps,
+            "weight_decay": weight_decay,
         },
     )
     wandb_run_id = wandb.run.id
@@ -194,6 +201,9 @@ def train(
     train_loss_sum = 0.0
     train_correct = 0
     train_total = 0
+    grad_norm_sum = 0.0
+    grad_norm_max = 0.0
+    grad_norm_count = 0
     total_elapsed = elapsed_before
 
     # Timing accumulators
@@ -280,21 +290,40 @@ def train(
 
         t0 = time.time()
         loss.backward()
+        # clip_grad_norm_ returns the pre-clip total norm — track it to catch
+        # gradient spikes before they show up as loss explosions.
+        if grad_clip > 0:
+            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+        else:
+            gn = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float("inf"))
+        gn = gn.item()
+        grad_norm_sum += gn
+        grad_norm_max = max(grad_norm_max, gn)
+        grad_norm_count += 1
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         time_backward += time.time() - t0
 
         t0 = time.time()
         optimizer.step()
-        if scheduler:
+        # LR schedule: warmup overrides everything for the first warmup_steps,
+        # then fall through to cosine or constant.
+        if warmup_steps > 0 and step < warmup_steps:
+            warmup_lr = lr * (step + 1) / warmup_steps
+            for pg in optimizer.param_groups:
+                pg["lr"] = warmup_lr
+        elif scheduler:
             scheduler.step()
         elif cosine_decay and max_seconds:
-            # Time-based cosine decay
             import math
             progress = min(total_elapsed / max_seconds, 1.0)
             new_lr = lr * 0.5 * (1 + math.cos(math.pi * progress))
             for pg in optimizer.param_groups:
                 pg["lr"] = new_lr
+        else:
+            # Constant LR: reset to base after warmup completes
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr
         time_optim += time.time() - t0
 
         step += 1
@@ -352,6 +381,10 @@ def train(
                 f"dataloader: {dl_breakdown} | eval: {time_eval:.1f}s"
             )
 
+            weight_norm = torch.norm(
+                torch.stack([torch.norm(p) for p in model.parameters()])
+            ).item()
+
             wandb.log(
                 {
                     "elapsed_t": total_elapsed,
@@ -361,6 +394,9 @@ def train(
                     **eval_metrics,
                     "samples_seen": samples_seen,
                     "lr": optimizer.param_groups[0]["lr"],
+                    "grad_norm_mean": grad_norm_sum / max(grad_norm_count, 1),
+                    "grad_norm_max": grad_norm_max,
+                    "weight_norm": weight_norm,
                     "pct_data": pct_data,
                     "pct_transfer": pct_transfer,
                     "pct_forward": pct_forward,
@@ -373,6 +409,9 @@ def train(
             train_loss_sum = 0.0
             train_correct = 0
             train_total = 0
+            grad_norm_sum = 0.0
+            grad_norm_max = 0.0
+            grad_norm_count = 0
 
             save_checkpoint()
 
@@ -391,31 +430,41 @@ def train(
         "final_eval_acc": eval_metrics["eval_acc"],
         "num_params": num_params,
         "num_layers": num_layers,
-        "hidden_channels": hidden_channels,
-        "kernel_size": kernel_size,
+        "n_embed": n_embed,
+        "num_heads": num_heads,
         "total_steps": step,
     }
 
 
 @app.function(image=image, timeout=86000)  # 23.5 hours for sweep coordination
 def sweep():
-    """Edit configs inline before launching."""
+    """LR sweep for transformer. Constant LR, grad_clip=1.0, warmup=500 steps.
+
+    Model: d=128, L=8, heads=8, ff=4x → ~17.6M params (comparable to CNN's 20M).
+    Using d=128 instead of 256 keeps runs fast; LR sensitivity shouldn't shift
+    much between 17M and 38M.
+    """
     configs = [
-        {"run_name": "baseline", "hidden_channels": 128},
+        {"run_name": "tf-lr-1e-4", "lr": 1e-4},
+        {"run_name": "tf-lr-3e-4", "lr": 3e-4},
+        {"run_name": "tf-lr-1e-3", "lr": 1e-3},
+        {"run_name": "tf-lr-3e-3", "lr": 3e-3},
     ]
 
     shared = {
-        "num_layers": 14,
-        "kernel_size": 3,
+        "n_embed": 128,
+        "num_layers": 8,
+        "num_heads": 8,
+        "ff_ratio": 4,
         "batch_size": 1024,
-        "lr": 0.001,
         "weight_decay": 0.01,
         "cosine_decay": False,
+        "grad_clip": 1.0,
+        "warmup_steps": 500,
         "num_samples": "full",
         "min_depth": 0,
-        "flip_board": True,
-        "max_seconds": 7200,
-        "max_steps": 0,
+        "max_seconds": 0,
+        "max_steps": 50000,
     }
     configs = [{**shared, **cfg} for cfg in configs]
 

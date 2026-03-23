@@ -58,15 +58,19 @@ class PolicyCNN(nn.Module):
         planes (batch, 13, 8, 8). meta (batch, 5). output (batch, 13 + 4, 8, 8).
         Turn channel is dropped since it's always "my turn".
         """
-        is_black = (meta[:, 0] == -1)  # (batch,)
+        is_black = meta[:, 0] == -1  # (batch,)
 
         if is_black.any():
             # Swap white/black planes and flip ranks for black's perspective
-            flipped_planes = torch.cat([planes[:, 6:12], planes[:, 0:6], planes[:, 12:13]], dim=1)
+            flipped_planes = torch.cat(
+                [planes[:, 6:12], planes[:, 0:6], planes[:, 12:13]], dim=1
+            )
             flipped_planes = flipped_planes.flip(dims=[-2])
 
             # Swap castling: [turn, K, Q, k, q] → [turn, k, q, K, Q]
-            flipped_meta = torch.stack([meta[:, 0], meta[:, 3], meta[:, 4], meta[:, 1], meta[:, 2]], dim=1)
+            flipped_meta = torch.stack(
+                [meta[:, 0], meta[:, 3], meta[:, 4], meta[:, 1], meta[:, 2]], dim=1
+            )
 
             mask = is_black[:, None, None, None]  # (batch, 1, 1, 1) for planes
             planes = torch.where(mask, flipped_planes, planes)
