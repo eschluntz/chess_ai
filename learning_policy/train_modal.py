@@ -39,8 +39,10 @@ def train(
     num_heads: int = 8,
     ff_ratio: int = 4,
     num_layers: int = 8,
-    batch_size: int = 1024,
-    lr: float = 0.001,
+    head_type: str = "spatial_unshared",
+    pos_encoding: str = "shaw2d",
+    batch_size: int = 2048,
+    lr: float = 4.24e-4,
     max_seconds: int = 0,
     max_steps: int = 0,
     eval_interval_seconds: int = 120,
@@ -51,7 +53,8 @@ def train(
     weight_decay: float = 0.01,
     cosine_decay: bool = False,
     grad_clip: float = 1.0,
-    warmup_steps: int = 500,
+    grad_skip_threshold: float = 20.0,
+    warmup_steps: int = 250,
 ):
     import sys
 
@@ -82,11 +85,12 @@ def train(
     print("=" * 60)
 
     # Load data from precomputed features (flip always on — Transformer bakes it in)
-    train_loader, eval_loader, eval_loader_deep, num_classes = get_dataloaders(
+    train_loader, eval_loader, eval_loader_deep, num_classes, vocab_moves = get_dataloaders(
         batch_size, num_samples=num_samples, min_depth=min_depth, flip_board=True
     )
     total_samples = train_loader.num_samples
     num_moves = num_classes
+    vocab_t = torch.as_tensor(vocab_moves, dtype=torch.long)
     print(f"[{run_name}] Training on {total_samples:,} samples")
 
     # Create model
@@ -96,8 +100,11 @@ def train(
         ff_ratio=ff_ratio,
         num_layers=num_layers,
         num_moves=num_moves,
+        head_type=head_type,
+        pos_encoding=pos_encoding,
     )
-    model = Transformer(cfg).to(device)
+    model = Transformer(cfg, vocab=vocab_t).to(device)
+    flops_per_sample = cfg.flops_per_sample()
     model = torch.compile(model)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -176,6 +183,9 @@ def train(
             "num_heads": num_heads,
             "ff_ratio": ff_ratio,
             "num_layers": num_layers,
+            "head_type": head_type,
+            "pos_encoding": pos_encoding,
+            "flops_per_sample": flops_per_sample,
             "batch_size": batch_size,
             "learning_rate": lr,
             "max_seconds": max_seconds,
@@ -183,6 +193,7 @@ def train(
             "num_moves": num_moves,
             "total_samples": total_samples,
             "grad_clip": grad_clip,
+            "grad_skip_threshold": grad_skip_threshold,
             "warmup_steps": warmup_steps,
             "weight_decay": weight_decay,
         },
@@ -204,6 +215,7 @@ def train(
     grad_norm_sum = 0.0
     grad_norm_max = 0.0
     grad_norm_count = 0
+    grad_skips = 0
     total_elapsed = elapsed_before
 
     # Timing accumulators
@@ -305,7 +317,13 @@ def train(
         time_backward += time.time() - t0
 
         t0 = time.time()
-        optimizer.step()
+        # Skip pathological batches entirely — a clipped step in a garbage
+        # direction can still destabilize the model (seen: gn=2038 at lr=1e-3).
+        if grad_skip_threshold > 0 and gn > grad_skip_threshold:
+            grad_skips += 1
+            optimizer.zero_grad()
+        else:
+            optimizer.step()
         # LR schedule: warmup overrides everything for the first warmup_steps,
         # then fall through to cosine or constant.
         if warmup_steps > 0 and step < warmup_steps:
@@ -388,6 +406,7 @@ def train(
             wandb.log(
                 {
                     "elapsed_t": total_elapsed,
+                    "cumulative_gflops": samples_seen * flops_per_sample / 1e9,
                     "epoch": epoch,
                     "train_loss": train_loss,
                     "train_acc": train_acc,
@@ -396,6 +415,7 @@ def train(
                     "lr": optimizer.param_groups[0]["lr"],
                     "grad_norm_mean": grad_norm_sum / max(grad_norm_count, 1),
                     "grad_norm_max": grad_norm_max,
+                    "grad_skips": grad_skips,
                     "weight_norm": weight_norm,
                     "pct_data": pct_data,
                     "pct_transfer": pct_transfer,
@@ -412,6 +432,7 @@ def train(
             grad_norm_sum = 0.0
             grad_norm_max = 0.0
             grad_norm_count = 0
+            grad_skips = 0
 
             save_checkpoint()
 
@@ -438,33 +459,41 @@ def train(
 
 @app.function(image=image, timeout=86000)  # 23.5 hours for sweep coordination
 def sweep():
-    """LR sweep for transformer. Constant LR, grad_clip=1.0, warmup=500 steps.
+    """Position encoding comparison: absolute vs bias64 vs shaw2d, at 3 sizes.
 
-    Model: d=128, L=8, heads=8, ff=4x → ~17.6M params (comparable to CNN's 20M).
-    Using d=128 instead of 256 keeps runs fast; LR sensitivity shouldn't shift
-    much between 17M and 38M.
+    Absolute baselines already exist as tf-shape-w-d{192,256,384} (renamed
+    from pareto). Filter with ^tf-(shape-w|pos)-d(192|256|384) for all 9.
+
+    All spatial_unshared head, L=8, bs=2048. Compare on cumulative_gflops.
+
+    Lc0 claims bias64 is "+50% effective size"; ChessFormer claims shaw2d is
+    +1.83pp @ 6M and beats bias64. Test both at 3 sizes to check scale-dependence.
     """
     configs = [
-        {"run_name": "tf-lr-1e-4", "lr": 1e-4},
-        {"run_name": "tf-lr-3e-4", "lr": 3e-4},
-        {"run_name": "tf-lr-1e-3", "lr": 1e-3},
-        {"run_name": "tf-lr-3e-3", "lr": 3e-3},
+        {"run_name": "tf-pos-bias64-d192", "n_embed": 192, "pos_encoding": "bias64"},
+        {"run_name": "tf-pos-bias64-d256", "n_embed": 256, "pos_encoding": "bias64"},
+        {"run_name": "tf-pos-bias64-d384", "n_embed": 384, "pos_encoding": "bias64"},
+        {"run_name": "tf-pos-shaw2d-d192", "n_embed": 192, "pos_encoding": "shaw2d"},
+        {"run_name": "tf-pos-shaw2d-d256", "n_embed": 256, "pos_encoding": "shaw2d"},
+        {"run_name": "tf-pos-shaw2d-d384", "n_embed": 384, "pos_encoding": "shaw2d"},
     ]
 
     shared = {
-        "n_embed": 128,
+        "head_type": "spatial_unshared",
         "num_layers": 8,
         "num_heads": 8,
         "ff_ratio": 4,
-        "batch_size": 1024,
+        "batch_size": 2048,
+        "lr": 4.24e-4,
+        "warmup_steps": 250,
         "weight_decay": 0.01,
         "cosine_decay": False,
         "grad_clip": 1.0,
-        "warmup_steps": 500,
+        "grad_skip_threshold": 20.0,
         "num_samples": "full",
         "min_depth": 0,
-        "max_seconds": 0,
-        "max_steps": 50000,
+        "max_seconds": 7200,
+        "max_steps": 0,
     }
     configs = [{**shared, **cfg} for cfg in configs]
 

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Chess Position Encodings</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 1100px; margin: 2em auto; padding: 0 1em; line-height: 1.5; color: #222; }
+  h1 { border-bottom: 2px solid #333; padding-bottom: 0.3em; }
+  h2 { color: #2a5; margin-top: 2em; }
+  h3 { color: #555; }
+  .row { display: flex; gap: 2em; align-items: flex-start; flex-wrap: wrap; margin: 1em 0; }
+  .col { flex: 1; min-width: 300px; }
+  code { background: #f4f4f4; padding: 2px 5px; border-radius: 3px; font-size: 0.95em; }
+  pre { background: #f8f8f8; padding: 1em; border-left: 3px solid #2a5; overflow-x: auto; font-size: 0.85em; }
+  .board { display: inline-grid; grid-template-columns: repeat(8, 28px); grid-auto-rows: 28px; border: 2px solid #333; margin: 0.5em; }
+  .sq { display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: bold; }
+  .light { background: #f0d9b5; }
+  .dark  { background: #b58863; }
+  .query { outline: 3px solid #d22; outline-offset: -3px; }
+  .hot   { background: #f66 !important; color: white; }
+  .warm  { background: #fb6 !important; }
+  .same  { background: #6c6 !important; color: white; }
+  .grid15 { display: inline-grid; grid-template-columns: repeat(15, 20px); grid-auto-rows: 20px; border: 2px solid #333; margin: 0.5em; }
+  .g { border: 1px solid #ddd; display: flex; align-items: center; justify-content: center; font-size: 9px; }
+  .center { background: #333; color: white; }
+  .knight-bucket { background: #6c6; }
+  table.cmp { border-collapse: collapse; margin: 1em 0; }
+  table.cmp th, table.cmp td { border: 1px solid #999; padding: 6px 12px; text-align: left; font-size: 0.9em; }
+  table.cmp th { background: #eee; }
+  .math { font-family: Georgia, serif; font-style: italic; }
+</style>
+</head>
+<body>
+
+<h1>Chess-Aware Position Encodings for Attention</h1>
+
+<p><b>The problem:</b> Your current transformer uses learned absolute position embeddings — a 64-entry lookup table added to token embeddings at input. This tells the model "this square is e4" but nothing about how squares <i>relate</i>. The model has to learn from scratch that e4 and d5 are adjacent, that a1 and h8 are on a diagonal, that a knight on c3 attacks e4.</p>
+
+<p>Both approaches below inject geometry directly into the <b>attention logits</b> — the scores that decide which squares attend to which — so the model doesn't have to discover chess topology on its own.</p>
+
+<hr>
+
+<h2>1. Lc0's 64×64 Absolute-Pair Bias</h2>
+
+<h3>The idea</h3>
+<p>For every ordered pair of squares <span class="math">(i, j)</span>, learn a scalar bias <span class="math">b[h, i, j]</span> per attention head. Add it to the attention logit before softmax. That's it.</p>
+
+<pre>attn_logit[i,j] = (q_i · k_j) / √d  +  bias[head, i, j]
+attn_weight = softmax(attn_logit)</pre>
+
+<p>It's a full <code>(H, 64, 64)</code> lookup table. Since every square-pair gets its own parameter, the model can learn <i>any</i> spatial relationship — diagonals, knight jumps, "back rank", "same file", "this exact pair" — without any structure imposed.</p>
+
+<h3>Visualization: one row of the bias</h3>
+<p>Suppose the query is on <b>e4</b> (red outline). The bias row <code>bias[h, e4, :]</code> is a learned 64-vector — one scalar per key square. After training, a head specializing in bishop patterns might learn something like:</p>
+
+<div class="row">
+  <div>
+    <div class="board" id="biasboard"></div>
+    <p style="font-size:0.85em;color:#666;">Red = query square (e4). Orange = high learned bias (head favors attending here).<br>
+    This head has discovered the diagonals from e4.</p>
+  </div>
+</div>
+
+<h3>Shape &amp; params</h3>
+<p>At H=8 heads: <code>8 × 64 × 64 = 32,768</code> params per layer. At L=8 layers: <b>262K total</b> (~4% of a 7M model). Trivially small.</p>
+
+<h3>Code</h3>
+<pre>class MultiHeadAttention(nn.Module):
+    def __init__(self, config):
+        ...
+        self.pos_bias = nn.Parameter(torch.zeros(config.num_heads, 64, 64))
+
+    def forward(self, x):
+        q, k, v = ...  # (B, H, 64, d_head)
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=self.pos_bias.unsqueeze(0),  # broadcast over batch
+            is_causal=False,
+        )
+        ...</pre>
+
+<p><b>Gotcha:</b> passing <code>attn_mask</code> may disable the flash-attention kernel. At T=64 the math-mode fallback is cheap (~4% of FLOPs), but measure throughput to be sure.</p>
+
+<hr>
+
+<h2>2. Shaw-style 2D Relative Encoding (ChessFormer)</h2>
+
+<h3>The idea</h3>
+<p>Instead of one bias per <i>absolute pair</i>, learn one per <i>displacement</i>. Two squares relate by a vector <span class="math">(Δrank, Δfile)</span>, each ranging from -7 to +7. That's <b>15 × 15 = 225 possible displacements</b>.</p>
+
+<p>The key insight: <b>chess is mostly translation-invariant</b>. A knight on c3 attacking e4 is <span class="math">(Δr=+1, Δf=+2)</span>. A knight on f6 attacking h7 is <i>also</i> <span class="math">(Δr=+1, Δf=+2)</span>. Same displacement → same attention bias. The 64×64 approach would learn these as two separate parameters; Shaw forces them to share.</p>
+
+<div class="row">
+  <div class="col">
+    <b>Knight on c3 → e4</b>
+    <div class="board" id="knight1"></div>
+    <p style="font-size:0.85em">Δrank=+1, Δfile=+2</p>
+  </div>
+  <div class="col">
+    <b>Knight on f6 → h7</b>
+    <div class="board" id="knight2"></div>
+    <p style="font-size:0.85em">Δrank=+1, Δfile=+2 — <b>same bucket</b></p>
+  </div>
+</div>
+
+<h3>The 15×15 displacement table</h3>
+<p>Each cell is one bucket. The center (0,0) is "same square". The 8 green cells are the knight displacements — any knight move, anywhere on the board, hits one of these 8 buckets.</p>
+
+<div class="grid15" id="disptable"></div>
+<p style="font-size:0.85em;color:#666;">Center (black) = Δ=(0,0). Green = the 8 knight-move displacements.<br>
+A bishop-specialized head would light up the diagonals through center; a rook head would light up row 0 and column 0.</p>
+
+<h3>How it plugs into attention</h3>
+<p>Shaw's original formulation learns <b>vectors</b> per bucket (not scalars), and they participate <i>inside</i> the dot product rather than as an additive bias:</p>
+
+<pre>e_ij = ( (x_i W_Q + a_Q[Δ(i,j)]) · (x_j W_K + a_K[Δ(i,j)]) ) / √d</pre>
+
+<p>where <code>a_Q, a_K ∈ ℝ^(225 × d_head)</code> are lookup tables indexed by the displacement bucket. This is more expressive than a scalar bias — the relative-position vector interacts with content via the dot product. But it means you can't use the fused SDPA kernel; you hand-roll attention.</p>
+
+<p>A simpler "scalar bias" variant (also used in some papers) learns just <code>bias[H, 225]</code> and adds it to logits exactly like the 64×64 approach — but with 225 params/head instead of 4096. Less expressive, but drops into SDPA the same way.</p>
+
+<h3>Shape &amp; params</h3>
+<p>Full Shaw: <code>225 × d_head × 2</code> (for <span class="math">a_Q</span> and <span class="math">a_K</span>), shared across layers. At d_head=32: <b>~14K total</b> regardless of L or H. Tiny.</p>
+
+<h3>Code sketch</h3>
+<pre># Precompute at init: (64, 64) tensor mapping each (i,j) pair to its displacement bucket 0..224
+rank_i, rank_j = sq_i // 8, sq_j // 8
+file_i, file_j = sq_i %  8, sq_j %  8
+bucket = (rank_j - rank_i + 7) * 15 + (file_j - file_i + 7)  # shape (64, 64), values in [0, 225)
+
+# Learnable tables (shared across layers)
+self.rel_q = nn.Parameter(torch.zeros(225, d_head))
+self.rel_k = nn.Parameter(torch.zeros(225, d_head))
+
+# Forward: gather then hand-roll attention
+aq = self.rel_q[bucket]  # (64, 64, d_head)
+ak = self.rel_k[bucket]
+logits = einsum("bhid,bhjd->bhij", q, k)
+logits += einsum("bhid,ijd->bhij", q, ak)         # content-position
+logits += einsum("ijd,bhjd->bhij", aq, k)         # position-content
+logits += einsum("ijd,ijd->ij", aq, ak)[None,None] # position-position
+attn = softmax(logits / sqrt(d_head))</pre>
+
+<hr>
+
+<h2>Side-by-Side</h2>
+
+<table class="cmp">
+<tr><th></th><th>64×64 bias (Lc0)</th><th>Shaw 2D relative (ChessFormer)</th></tr>
+<tr><td><b>Bias indexed by</b></td><td>Absolute pair (i, j)</td><td>Displacement (Δrank, Δfile)</td></tr>
+<tr><td><b>Unique buckets</b></td><td>4,096 per head</td><td>225 (shared across heads &amp; layers)</td></tr>
+<tr><td><b>Params @ L=8, H=8, d=256</b></td><td>262K</td><td>~14K</td></tr>
+<tr><td><b>Translation invariance</b></td><td>Must learn it (has capacity to)</td><td>Baked in by construction</td></tr>
+<tr><td><b>Absolute-position patterns</b><br><small>e.g. "pawn on 7th rank"</small></td><td>Can learn directly</td><td>Cannot — displacement-only. Relies on absolute pos-embed at input.</td></tr>
+<tr><td><b>Implementation effort</b></td><td>~2h (3 lines, keeps SDPA)</td><td>~5h (hand-roll attention, precompute lookup)</td></tr>
+<tr><td><b>SDPA compatible</b></td><td>Yes (via attn_mask)</td><td>No (vector form); yes (scalar variant)</td></tr>
+<tr><td><b>Reported impact</b></td><td>"Plays as if 50% larger" (Lc0)</td><td>+1.83pp policy acc @ 6M (ChessFormer);<br>claims to beat 64×64 variant</td></tr>
+</table>
+
+<h3>Which to try first?</h3>
+<p><b>Start with 64×64</b> — it's 3 lines, keeps your existing SDPA path, and Lc0's result is strong. If it works, you've gotten most of the benefit. Then optionally layer Shaw on top or swap to it for the extra ~1pp.</p>
+
+<p>The interesting architectural question is whether 64×64's extra expressiveness (absolute-pair patterns) actually helps, or whether Shaw's forced weight-sharing generalizes better on your 342M positions. With that much data you're probably not overfitting the 262K bias params, so 64×64's extra capacity is likely pure upside — but ChessFormer's ablation says otherwise. Worth testing both.</p>
+
+<script>
+// Render boards
+function mkBoard(id, highlights) {
+  const el = document.getElementById(id);
+  for (let r = 7; r >= 0; r--) {
+    for (let f = 0; f < 8; f++) {
+      const sq = document.createElement('div');
+      sq.className = 'sq ' + (((r+f)%2) ? 'dark' : 'light');
+      const idx = r*8 + f;
+      if (highlights[idx]) sq.classList.add(highlights[idx]);
+      const files = 'abcdefgh';
+      if (highlights[idx] === 'query') sq.textContent = files[f]+(r+1);
+      el.appendChild(sq);
+    }
+  }
+}
+
+// Board 1: e4 query, diagonals highlighted
+const b1 = {};
+b1[3*8+4] = 'query'; // e4 = rank 3 (0-indexed), file 4
+// diagonals from e4
+for (let d=1; d<8; d++) {
+  for (const [dr,df] of [[1,1],[1,-1],[-1,1],[-1,-1]]) {
+    const r=3+d*dr, f=4+d*df;
+    if (r>=0&&r<8&&f>=0&&f<8) b1[r*8+f]='warm';
+  }
+}
+mkBoard('biasboard', b1);
+
+// Knight boards
+const k1 = {}; k1[2*8+2]='query'; k1[3*8+4]='same'; mkBoard('knight1', k1);
+const k2 = {}; k2[5*8+5]='query'; k2[6*8+7]='same'; mkBoard('knight2', k2);
+
+// 15x15 displacement table
+const dt = document.getElementById('disptable');
+const knightDeltas = [[1,2],[2,1],[-1,2],[-2,1],[1,-2],[2,-1],[-1,-2],[-2,-1]];
+for (let dr=-7; dr<=7; dr++) {
+  for (let df=-7; df<=7; df++) {
+    const c = document.createElement('div');
+    c.className = 'g';
+    if (dr===0 && df===0) c.classList.add('center');
+    if (knightDeltas.some(([r,f])=>r===dr&&f===df)) c.classList.add('knight-bucket');
+    dt.appendChild(c);
+  }
+}
+</script>
+
+</body>
+</html>

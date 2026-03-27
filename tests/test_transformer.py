@@ -12,7 +12,11 @@ Board representation reference (board_repr.py):
 import pytest
 import torch
 
-from learning_policy.transformer_model import Transformer, TransformerConfig
+from learning_policy.transformer_model import (
+    Transformer,
+    TransformerConfig,
+    _displacement_buckets,
+)
 
 # Token IDs after tokenization: 0=empty, 1=wP, 2=wN, 3=wB, 4=wR, 5=wQ, 6=wK,
 # 7=bP, 8=bN, 9=bB, 10=bR, 11=bQ, 12=bK, 13=EP
@@ -131,16 +135,110 @@ def test_token_dtype(model):
     assert toks.dtype in (torch.long, torch.int64)
 
 
-def test_forward_smoke(model):
-    """End-to-end forward pass produces correct shape and finite values."""
-    planes = torch.randint(0, 2, (4, 13, 8, 8), dtype=torch.uint8)
+def _random_input(batch=4):
+    planes = torch.randint(0, 2, (batch, 13, 8, 8), dtype=torch.uint8)
     # At most one piece per square (otherwise sum trick gives out-of-range IDs)
     mask = torch.zeros_like(planes)
-    choice = torch.randint(0, 13, (4, 8, 8))
+    choice = torch.randint(0, 13, (batch, 8, 8))
     mask.scatter_(1, choice.unsqueeze(1), 1)
     planes = planes * mask
-    meta = torch.randint(-1, 2, (4, 5), dtype=torch.int8)
-    meta[:, 0] = torch.tensor([1, -1, 1, -1])
+    meta = torch.randint(-1, 2, (batch, 5), dtype=torch.int8)
+    meta[:, 0] = torch.tensor([1, -1] * (batch // 2))
+    return planes, meta
+
+
+def test_forward_smoke(model):
+    """End-to-end forward pass produces correct shape and finite values."""
+    planes, meta = _random_input()
     out = model(planes, meta)
     assert out.shape == (4, 1968)
     assert out.isfinite().all()
+
+
+# ---------------------------------------------------------------------------
+# Position encoding tests
+# ---------------------------------------------------------------------------
+
+
+def test_displacement_buckets_shape_and_range():
+    """Bucket lookup is (64, 64) with values in [0, 225)."""
+    b = _displacement_buckets()
+    assert b.shape == (64, 64)
+    assert b.min() >= 0 and b.max() < 225
+
+
+def test_displacement_buckets_diagonal_is_center():
+    """Δ=(0,0) → center bucket 7*15+7=112."""
+    b = _displacement_buckets()
+    assert (b.diagonal() == 112).all()
+
+
+def test_displacement_buckets_translation_invariant():
+    """Same displacement → same bucket regardless of absolute position.
+
+    Knight on c3 (sq=18) → e4 (sq=28): Δ=(+1, +2)
+    Knight on f6 (sq=45) → h7 (sq=55): Δ=(+1, +2)
+    These must map to the same bucket.
+    """
+    b = _displacement_buckets()
+    assert b[18, 28] == b[45, 55]
+    # And the bucket is (1+7)*15 + (2+7) = 129
+    assert b[18, 28] == 129
+
+
+def test_displacement_buckets_antisymmetric():
+    """Swapping i and j negates the displacement → different bucket (unless Δ=0)."""
+    b = _displacement_buckets()
+    # a1→h8: Δ=(7,7), bucket (14)*15+14 = 224
+    # h8→a1: Δ=(-7,-7), bucket 0*15+0 = 0
+    assert b[0, 63] == 224
+    assert b[63, 0] == 0
+
+
+@pytest.mark.parametrize("pos_encoding", ["absolute", "bias64", "shaw2d"])
+def test_pos_encoding_forward(pos_encoding):
+    """All three encoding modes produce correct output shape and are finite."""
+    cfg = TransformerConfig(
+        n_embed=32, num_heads=4, num_layers=2, num_moves=1968, pos_encoding=pos_encoding
+    )
+    m = Transformer(cfg)
+    planes, meta = _random_input()
+    out = m(planes, meta)
+    assert out.shape == (4, 1968)
+    assert out.isfinite().all()
+
+
+@pytest.mark.parametrize("pos_encoding", ["absolute", "bias64", "shaw2d"])
+def test_pos_encoding_backward(pos_encoding):
+    """Gradients flow through all three encoding modes."""
+    cfg = TransformerConfig(
+        n_embed=32, num_heads=4, num_layers=2, num_moves=1968, pos_encoding=pos_encoding
+    )
+    m = Transformer(cfg)
+    planes, meta = _random_input()
+    out = m(planes, meta)
+    out.sum().backward()
+    # Check the encoding-specific params received gradients
+    if pos_encoding == "bias64":
+        assert m.blocks[0].attn.pos_bias.grad is not None
+        assert m.blocks[0].attn.pos_bias.grad.abs().sum() > 0
+    elif pos_encoding == "shaw2d":
+        assert m.blocks[0].attn.rel_k.grad is not None
+        assert m.blocks[0].attn.rel_k.grad.abs().sum() > 0
+
+
+def test_bias64_param_count():
+    """bias64 adds H×64×64 params per layer."""
+    cfg = TransformerConfig(n_embed=256, num_heads=8, num_layers=8, pos_encoding="bias64")
+    m = Transformer(cfg)
+    bias_params = sum(p.numel() for n, p in m.named_parameters() if "pos_bias" in n)
+    assert bias_params == 8 * 8 * 64 * 64  # 262,144
+
+
+def test_shaw2d_param_count():
+    """shaw2d adds 225×head_size×2 params per layer."""
+    cfg = TransformerConfig(n_embed=256, num_heads=8, num_layers=8, pos_encoding="shaw2d")
+    m = Transformer(cfg)
+    rel_params = sum(p.numel() for n, p in m.named_parameters() if "rel_" in n)
+    head_size = 256 // 8
+    assert rel_params == 8 * 225 * head_size * 2  # 115,200
